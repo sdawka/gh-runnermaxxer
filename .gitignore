@@ -1,0 +1,14 @@
+# Runner tarballs (large binaries)
+actions-runner-*.tar.gz
+
+# Runtime directories
+runners/
+
+# Configuration (may contain URLs)
+.runnermaxxer.conf
+
+# macOS
+.DS_Store
+
+# Old script (if present)
+runners.sh
