@@ -151,6 +151,200 @@ load_config() {
     fi
 }
 
+validate_config() {
+    local errors=()
+    local warnings=()
+
+    # Check if config file exists
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        errors+=("No configuration file found")
+        return 1
+    fi
+
+    # Check if both REPO_URL and ORG_URL are set (ambiguous)
+    if [[ -n "$REPO_URL" && -n "$ORG_URL" ]]; then
+        errors+=("Both REPO_URL and ORG_URL are set - only one should be configured")
+    fi
+
+    # Check if neither is set
+    if [[ -z "$REPO_URL" && -z "$ORG_URL" ]]; then
+        errors+=("No target configured - set either REPO_URL or ORG_URL")
+    fi
+
+    # Validate REPO_URL format
+    if [[ -n "$REPO_URL" ]]; then
+        if [[ ! "$REPO_URL" =~ ^https://github\.com/[^/]+/[^/]+$ ]]; then
+            errors+=("Invalid REPO_URL format: $REPO_URL")
+            errors+=("Expected: https://github.com/owner/repo")
+        fi
+    fi
+
+    # Validate ORG_URL format
+    if [[ -n "$ORG_URL" ]]; then
+        if [[ ! "$ORG_URL" =~ ^https://github\.com/[^/]+$ ]]; then
+            errors+=("Invalid ORG_URL format: $ORG_URL")
+            errors+=("Expected: https://github.com/org-name")
+        fi
+    fi
+
+    # Validate MAX_RUNNERS is a number
+    if [[ -n "$MAX_RUNNERS" && ! "$MAX_RUNNERS" =~ ^[0-9]+$ ]]; then
+        errors+=("MAX_RUNNERS must be a number, got: $MAX_RUNNERS")
+    fi
+
+    # Validate MAX_RUNNERS is reasonable
+    if [[ -n "$MAX_RUNNERS" && "$MAX_RUNNERS" =~ ^[0-9]+$ ]]; then
+        if [[ "$MAX_RUNNERS" -lt 1 ]]; then
+            errors+=("MAX_RUNNERS must be at least 1")
+        elif [[ "$MAX_RUNNERS" -gt 100 ]]; then
+            warnings+=("MAX_RUNNERS is very high ($MAX_RUNNERS) - this may cause resource issues")
+        fi
+    fi
+
+    # Validate RUNNER_NAME_PREFIX
+    if [[ -n "$RUNNER_NAME_PREFIX" ]]; then
+        if [[ ! "$RUNNER_NAME_PREFIX" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            errors+=("RUNNER_NAME_PREFIX contains invalid characters: $RUNNER_NAME_PREFIX")
+            errors+=("Use only letters, numbers, underscores, and hyphens")
+        fi
+    fi
+
+    # Print warnings
+    if [[ ${#warnings[@]} -gt 0 ]]; then
+        for warning in "${warnings[@]}"; do
+            echo -e "${YELLOW}⚠ $warning${NC}"
+        done
+    fi
+
+    # Print errors and return failure if any
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        for error in "${errors[@]}"; do
+            echo -e "${RED}✗ $error${NC}"
+        done
+        return 1
+    fi
+
+    return 0
+}
+
+run_onboarding() {
+    echo ""
+    echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}${CYAN}║         gh-runnermaxxer Setup                     ║${NC}"
+    echo -e "${BOLD}${CYAN}╚═══════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "${DIM}Let's configure your self-hosted runner environment.${NC}"
+    echo ""
+
+    # Step 1: Target type
+    echo -e "${BOLD}Step 1: Runner Target${NC}"
+    echo ""
+    echo "  Where should runners register?"
+    echo ""
+    echo -e "  ${CYAN}1${NC}) A specific repository"
+    echo -e "  ${CYAN}2${NC}) An entire organization"
+    echo ""
+    echo -e "  Choice [1/2]: \c"
+    read -r target_choice
+
+    local new_repo_url=""
+    local new_org_url=""
+
+    case "$target_choice" in
+        1)
+            echo ""
+            echo -e "  ${DIM}Example: https://github.com/myorg/myrepo${NC}"
+            echo -e "  Repository URL: \c"
+            read -r new_repo_url
+            if [[ ! "$new_repo_url" =~ ^https://github\.com/[^/]+/[^/]+$ ]]; then
+                echo -e "\n  ${RED}Invalid format. Expected: https://github.com/owner/repo${NC}"
+                echo -e "  ${DIM}Run the script again to retry.${NC}"
+                exit 1
+            fi
+            ;;
+        2)
+            echo ""
+            echo -e "  ${DIM}Example: https://github.com/myorg${NC}"
+            echo -e "  Organization URL: \c"
+            read -r new_org_url
+            if [[ ! "$new_org_url" =~ ^https://github\.com/[^/]+$ ]]; then
+                echo -e "\n  ${RED}Invalid format. Expected: https://github.com/org-name${NC}"
+                echo -e "  ${DIM}Run the script again to retry.${NC}"
+                exit 1
+            fi
+            ;;
+        *)
+            echo -e "\n  ${RED}Invalid choice${NC}"
+            exit 1
+            ;;
+    esac
+
+    # Step 2: Runner name prefix
+    echo ""
+    echo -e "${BOLD}Step 2: Runner Name Prefix${NC}"
+    echo ""
+    local default_prefix
+    default_prefix=$(hostname -s)
+    echo -e "  Runners will be named: prefix-1, prefix-2, etc."
+    echo -e "  ${DIM}Default: $default_prefix${NC}"
+    echo -e "  Runner name prefix [$default_prefix]: \c"
+    read -r new_prefix
+    [[ -z "$new_prefix" ]] && new_prefix="$default_prefix"
+
+    if [[ ! "$new_prefix" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo -e "\n  ${RED}Invalid characters. Use only letters, numbers, underscores, hyphens.${NC}"
+        exit 1
+    fi
+
+    # Step 3: Max runners
+    echo ""
+    echo -e "${BOLD}Step 3: Maximum Runners${NC}"
+    echo ""
+    echo -e "  How many runners can run simultaneously?"
+    echo -e "  ${DIM}Default: 20${NC}"
+    echo -e "  Max runners [20]: \c"
+    read -r new_max
+    [[ -z "$new_max" ]] && new_max="20"
+
+    if [[ ! "$new_max" =~ ^[0-9]+$ ]] || [[ "$new_max" -lt 1 ]]; then
+        echo -e "\n  ${RED}Invalid number. Must be 1 or greater.${NC}"
+        exit 1
+    fi
+
+    # Confirm
+    echo ""
+    echo -e "${BOLD}Configuration Summary${NC}"
+    echo -e "────────────────────────────────────────"
+    if [[ -n "$new_repo_url" ]]; then
+        echo -e "  Target:     ${GREEN}$new_repo_url${NC} (repository)"
+    else
+        echo -e "  Target:     ${GREEN}$new_org_url${NC} (organization)"
+    fi
+    echo -e "  Prefix:     ${GREEN}$new_prefix${NC}"
+    echo -e "  Max:        ${GREEN}$new_max${NC}"
+    echo -e "────────────────────────────────────────"
+    echo ""
+    echo -e "  Save this configuration? [Y/n]: \c"
+    read -r confirm
+
+    if [[ "$confirm" =~ ^[Nn] ]]; then
+        echo -e "\n  ${YELLOW}Aborted. No changes saved.${NC}"
+        exit 0
+    fi
+
+    # Save config
+    REPO_URL="$new_repo_url"
+    ORG_URL="$new_org_url"
+    RUNNER_NAME_PREFIX="$new_prefix"
+    MAX_RUNNERS="$new_max"
+    save_config
+
+    echo ""
+    echo -e "  ${GREEN}✓ Configuration saved to .runnermaxxer.conf${NC}"
+    echo ""
+    sleep 1
+}
+
 save_config() {
     cat > "$CONFIG_FILE" << EOF
 # gh-runnermaxxer configuration
@@ -727,11 +921,62 @@ edit_config() {
 # Main
 # ============================================================================
 
+# Handle command-line flags
+case "${1:-}" in
+    --setup|-s)
+        load_config
+        run_onboarding
+        echo -e "${GREEN}Setup complete. Run without --setup to start.${NC}"
+        exit 0
+        ;;
+    --help|-h)
+        echo "Usage: ./runnermaxxer.sh [OPTIONS]"
+        echo ""
+        echo "GitHub Actions Self-Hosted Runner Manager"
+        echo ""
+        echo "Options:"
+        echo "  --setup, -s    Run interactive setup wizard"
+        echo "  --help, -h     Show this help message"
+        echo ""
+        echo "Configuration:"
+        echo "  Copy .runnermaxxer.conf.sample to .runnermaxxer.conf"
+        echo "  Or run with --setup for interactive configuration"
+        echo ""
+        exit 0
+        ;;
+esac
+
 echo -e "${BOLD}${CYAN}gh-runnermaxxer${NC}"
 echo -e "${DIM}GitHub Actions Self-Hosted Runner Manager${NC}"
 echo ""
 
 load_config
+
+# Check if onboarding is needed
+needs_onboarding=false
+
+if [[ ! -f "$CONFIG_FILE" ]]; then
+    echo -e "${YELLOW}No configuration found.${NC}"
+    if [[ -f "$SCRIPT_DIR/.runnermaxxer.conf.sample" ]]; then
+        echo -e "${DIM}Tip: Copy .runnermaxxer.conf.sample to .runnermaxxer.conf${NC}"
+        echo -e "${DIM}     or continue below for interactive setup.${NC}"
+        echo ""
+    fi
+    needs_onboarding=true
+elif ! validate_config; then
+    echo ""
+    echo -e "${YELLOW}Configuration issues detected.${NC}"
+    echo -e "Would you like to run setup to fix them? [Y/n]: \c"
+    read -r fix_choice
+    if [[ ! "$fix_choice" =~ ^[Nn] ]]; then
+        needs_onboarding=true
+    fi
+fi
+
+if [[ "$needs_onboarding" == "true" ]]; then
+    run_onboarding
+    load_config
+fi
 
 echo -e "${DIM}Running preflight checks...${NC}"
 preflight_checks

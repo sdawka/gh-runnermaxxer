@@ -1,0 +1,15 @@
+# gh-runnermaxxer configuration
+# Copy this file to .runnermaxxer.conf and edit as needed
+
+# Target: Set ONE of these (not both)
+# For a specific repository:
+REPO_URL="https://github.com/your-org/your-repo"
+# For an entire organization (all repos):
+ORG_URL=""
+
+# Runner naming prefix (default: hostname)
+# Runners will be named: prefix-1, prefix-2, etc.
+RUNNER_NAME_PREFIX="my-runner"
+
+# Maximum number of runners allowed (default: 20)
+MAX_RUNNERS="20"
