@@ -21,6 +21,8 @@ A TUI for managing multiple GitHub Actions self-hosted runners on a single machi
 
 ## Features
 
+- **Interactive setup wizard** - guided configuration on first run
+- **Config validation** - detects invalid URLs, bad values, and offers to fix them
 - **Scale runners up/down** with a single keypress
 - **Auto-detect labels** based on system capabilities (OS, arch, memory, GPU, Docker, etc.)
 - **Auto-detect runner tarball** - finds the correct one for your platform
@@ -51,7 +53,7 @@ A TUI for managing multiple GitHub Actions self-hosted runners on a single machi
    ./runnermaxxer.sh
    ```
 
-3. **Configure your target** - press `e` to set your repository or organization URL
+3. **Configure** - on first run, an interactive setup wizard guides you through configuration
 
 4. **Add runners** - press `+` or use `n` to scale to a specific count
 
@@ -95,9 +97,34 @@ jobs:
     runs-on: [self-hosted, macos, arm64, docker]
 ```
 
+## CLI Options
+
+```bash
+./runnermaxxer.sh [OPTIONS]
+
+Options:
+  --setup, -s    Run interactive setup wizard
+  --help, -h     Show help message
+```
+
 ## Configuration
 
-Configuration is stored in `.runnermaxxer.conf` and can be set via the TUI (`e`) or environment variables:
+On first run (or with `--setup`), an interactive wizard guides you through setup:
+
+1. Choose target: repository or organization
+2. Set runner name prefix (default: hostname)
+3. Set maximum runners (default: 20)
+
+Configuration is validated on startup. If issues are detected (invalid URLs, bad values), you'll be prompted to fix them.
+
+### Config File
+
+Configuration is stored in `.runnermaxxer.conf`. You can also copy the sample:
+
+```bash
+cp .runnermaxxer.conf.sample .runnermaxxer.conf
+# Edit as needed
+```
 
 | Variable | Description |
 |----------|-------------|
@@ -106,14 +133,17 @@ Configuration is stored in `.runnermaxxer.conf` and can be set via the TUI (`e`)
 | `RUNNER_NAME_PREFIX` | Prefix for runner names (default: hostname) |
 | `MAX_RUNNERS` | Maximum runners allowed (default: 20) |
 
+**Note:** Set only ONE of `REPO_URL` or `ORG_URL`, not both.
+
 ## Directory Structure
 
 ```
 gh-runnermaxxer/
-├── runnermaxxer.sh           # Main script
-├── actions-runner-*.tar.gz   # Runner tarball (you download this)
-├── .runnermaxxer.conf        # Configuration (auto-created)
-└── runners/                  # Runner instances (auto-created)
+├── runnermaxxer.sh              # Main script
+├── actions-runner-*.tar.gz      # Runner tarball (you download this)
+├── .runnermaxxer.conf.sample    # Sample configuration
+├── .runnermaxxer.conf           # Your configuration (auto-created via setup)
+└── runners/                     # Runner instances (auto-created)
     ├── runner-1/
     ├── runner-2/
     ├── .pids/
