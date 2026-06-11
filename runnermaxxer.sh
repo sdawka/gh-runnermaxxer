@@ -14,6 +14,7 @@ RUNNER_NAME_PREFIX="${RUNNER_NAME_PREFIX:-$(hostname -s)}"
 REPO_URL="${REPO_URL:-}"
 ORG_URL="${ORG_URL:-}"
 MAX_RUNNERS="${MAX_RUNNERS:-20}"
+REFRESH_INTERVAL="${REFRESH_INTERVAL:-5}"
 
 PID_DIR="$RUNNER_BASE_DIR/.pids"
 LOG_DIR="$RUNNER_BASE_DIR/.logs"
@@ -142,7 +143,8 @@ info() {
 cleanup() {
     rm -f "$LOCK_FILE"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT TERM
 
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
@@ -385,7 +387,7 @@ preflight_checks() {
     for cmd in gh tar; do
         if ! command -v "$cmd" &>/dev/null; then
             echo -e "${RED}✗ Missing required command: $cmd${NC}" >&2
-            ((errors++))
+            errors=$((errors + 1))
         fi
     done
 
@@ -393,7 +395,7 @@ preflight_checks() {
     if command -v gh &>/dev/null; then
         if ! gh auth status &>/dev/null; then
             echo -e "${RED}✗ gh CLI is not authenticated. Run: gh auth login${NC}" >&2
-            ((errors++))
+            errors=$((errors + 1))
         fi
     fi
 
@@ -402,10 +404,10 @@ preflight_checks() {
     if [[ -z "$RUNNER_TAR" ]]; then
         echo -e "${RED}✗ No runner tarball found. Download from:${NC}" >&2
         echo -e "${DIM}  https://github.com/actions/runner/releases${NC}" >&2
-        ((errors++))
+        errors=$((errors + 1))
     elif ! tar -tzf "$RUNNER_TAR" &>/dev/null; then
         echo -e "${RED}✗ Runner tarball is corrupted${NC}" >&2
-        ((errors++))
+        errors=$((errors + 1))
     else
         echo -e "${GREEN}✓${NC} Found runner: $(basename "$RUNNER_TAR")"
     fi
@@ -422,7 +424,7 @@ preflight_checks() {
         lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "")
         if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
             echo -e "${RED}✗ Another instance is running (PID $lock_pid)${NC}" >&2
-            ((errors++))
+            errors=$((errors + 1))
         else
             rm -f "$LOCK_FILE"
         fi
@@ -484,7 +486,7 @@ is_running() {
 count_running() {
     local count=0
     for id in $(get_runner_ids); do
-        is_running "$id" && ((count++))
+        is_running "$id" && count=$((count + 1))
     done
     echo $count
 }
@@ -606,9 +608,9 @@ stop_runner() {
     [[ ! -f "$pid_file" ]] && return 0
     local pid
     pid=$(cat "$pid_file")
-    kill "$pid" 2>/dev/null
+    kill "$pid" 2>/dev/null || true
     for _ in {1..10}; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
-    kill -9 "$pid" 2>/dev/null
+    kill -9 "$pid" 2>/dev/null || true
     rm -f "$pid_file"
 }
 
@@ -668,7 +670,7 @@ draw_ui() {
         for id in $(get_runner_ids); do
             if is_running "$id"; then
                 local pid status status_color
-                pid=$(cat "$PID_DIR/runner-$id.pid")
+                pid=$(cat "$PID_DIR/runner-$id.pid" 2>/dev/null || echo "?")
                 status=$(get_runner_status "$id")
                 status_color="${DIM}"
 
@@ -694,6 +696,7 @@ draw_ui() {
     echo -e "    ${CYAN}n${NC}  Scale to N          ${CYAN}c${NC}  Check GitHub status"
     echo -e "    ${CYAN}e${NC}  Edit config         ${CYAN}q${NC}  Quit"
     echo ""
+    echo -e "  ${DIM}Auto-refreshes every ${REFRESH_INTERVAL}s${NC}"
 }
 
 add_runner() {
@@ -707,7 +710,7 @@ add_runner() {
     fi
 
     local next_id=1
-    while [[ -d "$RUNNER_BASE_DIR/runner-$next_id" ]]; do ((next_id++)); done
+    while [[ -d "$RUNNER_BASE_DIR/runner-$next_id" ]]; do next_id=$((next_id + 1)); done
 
     echo -e "\n  ${BLUE}Setting up runner-$next_id...${NC}"
     if ! setup_runner "$next_id"; then
@@ -796,13 +799,13 @@ scale_to() {
         echo -e "  ${BLUE}Adding $to_add runners...${NC}"
         for ((i=0; i<to_add; i++)); do
             local next_id=1
-            while [[ -d "$RUNNER_BASE_DIR/runner-$next_id" ]]; do ((next_id++)); done
+            while [[ -d "$RUNNER_BASE_DIR/runner-$next_id" ]]; do next_id=$((next_id + 1)); done
             echo -e "    Setting up runner-$next_id..."
             if setup_runner "$next_id" && start_runner "$next_id"; then
                 echo -e "    ${GREEN}✓${NC} runner-$next_id"
             else
                 echo -e "    ${RED}✗${NC} runner-$next_id failed"
-                ((failed++))
+                failed=$((failed + 1))
             fi
         done
     elif [[ $count -lt $current ]]; then
@@ -838,7 +841,9 @@ view_logs() {
 
     echo -e "\n  ${DIM}(Ctrl+C to exit)${NC}\n"
     sleep 1
-    tail -f "$log_file"
+    trap '' INT
+    tail -f "$log_file" || true
+    trap 'exit 130' INT
 }
 
 check_github_status() {
@@ -989,10 +994,14 @@ if [[ -n "$(get_target_url)" ]]; then
     fi
 fi
 
+# Guard against a bad value busy-looping the UI
+[[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ && "$REFRESH_INTERVAL" -ge 1 ]] || REFRESH_INTERVAL=5
+
 while true; do
     draw_ui
     echo -e "  > \c"
-    read -rsn1 key
+    key=""
+    read -rsn1 -t "$REFRESH_INTERVAL" key || true
 
     case "$key" in
         +|=) add_runner ;;

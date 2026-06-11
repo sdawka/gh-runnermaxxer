@@ -132,6 +132,7 @@ cp .runnermaxxer.conf.sample .runnermaxxer.conf
 | `ORG_URL` | Organization URL (e.g., `https://github.com/myorg`) |
 | `RUNNER_NAME_PREFIX` | Prefix for runner names (default: hostname) |
 | `MAX_RUNNERS` | Maximum runners allowed (default: 20) |
+| `REFRESH_INTERVAL` | Seconds between automatic status refreshes (default: 5) |
 
 **Note:** Set only ONE of `REPO_URL` or `ORG_URL`, not both.
 
