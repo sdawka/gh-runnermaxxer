@@ -640,8 +640,7 @@ remove_runner() {
 # UI
 # ============================================================================
 
-draw_ui() {
-    clear
+render_ui() {
     local total running target_url
 
     total=$(get_runner_count)
@@ -660,7 +659,7 @@ draw_ui() {
         echo -e "  ${YELLOW}Target: Not configured (press 'e' to set up)${NC}"
     fi
 
-    echo -e "  ${DIM}Labels: $(detect_labels)${NC}"
+    echo -e "  ${DIM}Labels: ${CACHED_LABELS}${NC}"
     echo ""
     echo -e "  ${BOLD}Status:${NC} ${GREEN}$running running${NC} / $total configured"
     echo ""
@@ -697,6 +696,17 @@ draw_ui() {
     echo -e "    ${CYAN}e${NC}  Edit config         ${CYAN}q${NC}  Quit"
     echo ""
     echo -e "  ${DIM}Auto-refreshes every ${REFRESH_INTERVAL}s${NC}"
+}
+
+draw_ui() {
+    # Render the full frame off-screen first, then repaint in place.
+    # Clearing each line's tail (\033[K) and everything below the frame
+    # (\033[J) replaces `clear`, so the screen never goes blank between
+    # frames.
+    local frame
+    frame=$(render_ui)
+    frame="${frame//$'\n'/$'\033[K\n'}"
+    printf '\033[H%s\033[K\n\033[J' "$frame"
 }
 
 add_runner() {
@@ -997,6 +1007,11 @@ fi
 # Guard against a bad value busy-looping the UI
 [[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ && "$REFRESH_INTERVAL" -ge 1 ]] || REFRESH_INTERVAL=5
 
+# Labels can't change while running; detect_labels shells out to
+# system_profiler etc., too slow to run every frame
+CACHED_LABELS=$(detect_labels)
+
+clear
 while true; do
     draw_ui
     echo -e "  > \c"
