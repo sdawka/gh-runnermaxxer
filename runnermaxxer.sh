@@ -483,6 +483,32 @@ is_running() {
     [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null
 }
 
+# Desired-state tracking: a runner with a .stopped marker was stopped on
+# purpose and must NOT be auto-restarted. Any other runner that isn't
+# running is treated as crashed and gets brought back up by the supervisor.
+mark_stopped() {
+    touch "$PID_DIR/runner-$1.stopped"
+}
+
+unmark_stopped() {
+    rm -f "$PID_DIR/runner-$1.stopped"
+}
+
+is_marked_stopped() {
+    [[ -f "$PID_DIR/runner-$1.stopped" ]]
+}
+
+# Restart any runner that died unexpectedly. Runners that were stopped via
+# a command keep their .stopped marker and are left alone.
+supervise_runners() {
+    [[ -z "$(get_target_url)" ]] && return
+    for id in $(get_runner_ids); do
+        if ! is_running "$id" && ! is_marked_stopped "$id"; then
+            start_runner "$id" >/dev/null 2>&1 || true
+        fi
+    done
+}
+
 count_running() {
     local count=0
     for id in $(get_runner_ids); do
@@ -578,6 +604,10 @@ start_runner() {
     local runner_dir="$RUNNER_BASE_DIR/runner-$id"
     local pid_file="$PID_DIR/runner-$id.pid"
 
+    # Starting (or restarting) a runner means we want it up: clear any
+    # manual-stop marker so the supervisor keeps it alive.
+    unmark_stopped "$id"
+
     is_running "$id" && return 0
 
     [[ ! -d "$runner_dir" ]] && { warn "Runner directory not found"; return 1; }
@@ -605,6 +635,8 @@ start_runner() {
 stop_runner() {
     local id=$1
     local pid_file="$PID_DIR/runner-$id.pid"
+    # Record that this stop was intentional so the supervisor leaves it down.
+    mark_stopped "$id"
     [[ ! -f "$pid_file" ]] && return 0
     local pid
     pid=$(cat "$pid_file")
@@ -634,6 +666,7 @@ remove_runner() {
     fi
 
     rm -f "$LOG_DIR/runner-$id.log"
+    rm -f "$PID_DIR/runner-$id.stopped"
 }
 
 # ============================================================================
@@ -678,8 +711,10 @@ render_ui() {
                 [[ "$status" == *"error"* ]] && status_color="${RED}"
 
                 echo -e "    ${GREEN}●${NC} runner-$id ${DIM}PID $pid${NC} ${status_color}[$status]${NC}"
-            else
+            elif is_marked_stopped "$id"; then
                 echo -e "    ${RED}○${NC} runner-$id ${DIM}stopped${NC}"
+            else
+                echo -e "    ${YELLOW}◌${NC} runner-$id ${YELLOW}restarting...${NC}"
             fi
         done
     else
@@ -1013,6 +1048,7 @@ CACHED_LABELS=$(detect_labels)
 
 clear
 while true; do
+    supervise_runners
     draw_ui
     echo -e "  > \c"
     key=""

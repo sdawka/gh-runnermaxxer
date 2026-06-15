@@ -7,6 +7,9 @@ runners/
 # Configuration (may contain URLs)
 .runnermaxxer.conf
 
+# npm cache
+.npm/
+
 # macOS
 .DS_Store
 
