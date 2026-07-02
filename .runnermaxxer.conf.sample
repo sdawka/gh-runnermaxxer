@@ -13,3 +13,19 @@ RUNNER_NAME_PREFIX="my-runner"
 
 # Maximum number of runners allowed (default: 20)
 MAX_RUNNERS="20"
+
+# Seconds between UI refreshes / supervisor ticks (default: 5)
+REFRESH_INTERVAL="5"
+
+# Crashed runners are restarted with exponential backoff (5s, 10s, 20s, ...).
+# After this many consecutive rapid crashes the runner is quarantined until
+# manually started again (default: 5)
+MAX_RESTART_ATTEMPTS="5"
+
+# Runner logs are truncated (keeping a .1 copy) past this size (default: 10)
+MAX_LOG_SIZE_MB="10"
+
+# Every N supervisor ticks, cross-check runners against the GitHub API and
+# recycle any that GitHub reports offline while the local process is alive.
+# Set to 0 to disable (default: 12, i.e. every ~60s)
+GH_HEALTH_TICKS="12"

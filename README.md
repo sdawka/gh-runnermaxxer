@@ -22,29 +22,30 @@ A TUI for managing multiple GitHub Actions self-hosted runners on a single machi
 ## Features
 
 - **Interactive setup wizard** - guided configuration on first run
-- **Config validation** - detects invalid URLs, bad values, and offers to fix them
-- **Scale runners up/down** with a single keypress
-- **Auto-detect labels** based on system capabilities (OS, arch, memory, GPU, Docker, etc.)
-- **Auto-detect runner tarball** - finds the correct one for your platform
-- **Live status** showing what each runner is doing (idle, running job, errors)
+- **Self-healing supervisor** - crashed runners restart automatically with exponential backoff; crash-looping runners are quarantined instead of restarting forever
+- **GitHub-side health checks** - runners that GitHub reports offline (wedged listener, stale credentials) are recycled even if the local process looks alive
+- **Whole-process-tree stop** - stopping a runner kills `Runner.Listener` and workers too, not just the wrapper script, with graceful SIGINT → SIGTERM → SIGKILL escalation
+- **Orphan adoption** - if the manager crashes and restarts, it re-adopts still-running runner processes instead of starting duplicates
+- **Auto-download runner tarball** - fetches the latest release for your OS/arch and verifies its SHA-256 checksum
+- **Log rotation** - runner logs are truncated past a size limit so they can't fill the disk
+- **Config validation** - detects invalid URLs, bad values, and offers to fix them; pasted URLs are normalized (trailing `/`, `.git`)
+- **Scale runners up/down** with a single keypress - scale-down prefers idle runners and warns before killing one mid-job
+- **Auto-detect labels** based on system capabilities (OS, arch, memory, GPU, Docker, WSL, etc.)
+- **Live status** showing what each runner is doing (idle, running job, errors, quarantined)
 - **Works with repos or orgs** - configure once, spin up runners
 - **Uses `gh` CLI** for authentication - no PAT management needed
 
 ## Requirements
 
+- bash >= 3.2 (stock macOS bash works)
 - [GitHub CLI](https://cli.github.com/) (`gh`) - authenticated with `gh auth login`
-- GitHub Actions runner tarball for your platform
+- macOS (Intel or Apple Silicon) or glibc-based Linux (Debian, Ubuntu, Fedora, Arch, ..., including WSL2)
+
+Not supported: Windows (the Windows runner uses a different install flow), Alpine/musl (the runner requires glibc), WSL1. The script detects these and fails fast with a clear message. On Linux, if `libicu` is missing the script points you at the runner's bundled `installdependencies.sh`.
 
 ## Quick Start
 
-1. **Download the runner tarball** from [actions/runner releases](https://github.com/actions/runner/releases)
-
-   ```bash
-   # Example for macOS ARM64
-   curl -LO https://github.com/actions/runner/releases/download/v2.320.0/actions-runner-osx-arm64-2.320.0.tar.gz
-   ```
-
-2. **Clone and run**
+1. **Clone and run**
 
    ```bash
    git clone https://github.com/YOUR_USERNAME/gh-runnermaxxer.git
@@ -53,7 +54,9 @@ A TUI for managing multiple GitHub Actions self-hosted runners on a single machi
    ./runnermaxxer.sh
    ```
 
-3. **Configure** - on first run, an interactive setup wizard guides you through configuration
+2. **Configure** - on first run, an interactive setup wizard guides you through configuration
+
+3. **Runner tarball** - if none is present, the script offers to download the latest release for your platform (checksum-verified). You can also fetch it explicitly with `./runnermaxxer.sh --download`, or download manually from [actions/runner releases](https://github.com/actions/runner/releases)
 
 4. **Add runners** - press `+` or use `n` to scale to a specific count
 
@@ -97,14 +100,29 @@ jobs:
     runs-on: [self-hosted, macos, arm64, docker]
 ```
 
+## Self-Healing Behavior
+
+While the TUI is open, a supervisor runs every refresh tick:
+
+- A runner that dies unexpectedly is restarted with exponential backoff (5s, 10s, 20s, 40s, ...).
+- After `MAX_RESTART_ATTEMPTS` consecutive rapid crashes, the runner is **quarantined** (shown as `✖` with the failure reason) so it can't crash-loop forever. Press `s` (start all) or `r` to clear the quarantine and retry.
+- A runner stopped on purpose (via `x` or `-`) stays down.
+- Every `GH_HEALTH_TICKS` ticks, local runners are cross-checked against the GitHub API; a runner whose process is alive but that GitHub reports offline twice in a row is recycled. This check is skipped when the API is unreachable, so a network outage never triggers mass restarts.
+- Runner logs are truncated past `MAX_LOG_SIZE_MB` (a `.log.1` copy is kept).
+- Stale PID files (e.g. after a reboot) are detected via process-identity checks, so a recycled PID is never mistaken for a live runner or killed by accident.
+
+Runners are detached processes: quitting the manager can leave them running (you'll be asked), but they are only supervised while the TUI is open.
+
 ## CLI Options
 
 ```bash
 ./runnermaxxer.sh [OPTIONS]
 
 Options:
-  --setup, -s    Run interactive setup wizard
-  --help, -h     Show help message
+  --setup, -s     Run interactive setup wizard
+  --download, -d  Download the latest runner tarball for this platform
+  --version, -v   Print version
+  --help, -h      Show help message
 ```
 
 ## Configuration
@@ -133,6 +151,9 @@ cp .runnermaxxer.conf.sample .runnermaxxer.conf
 | `RUNNER_NAME_PREFIX` | Prefix for runner names (default: hostname) |
 | `MAX_RUNNERS` | Maximum runners allowed (default: 20) |
 | `REFRESH_INTERVAL` | Seconds between automatic status refreshes (default: 5) |
+| `MAX_RESTART_ATTEMPTS` | Consecutive crashes before a runner is quarantined (default: 5) |
+| `MAX_LOG_SIZE_MB` | Truncate runner logs past this size (default: 10) |
+| `GH_HEALTH_TICKS` | GitHub-side health check every N ticks, 0 to disable (default: 12) |
 
 **Note:** Set only ONE of `REPO_URL` or `ORG_URL`, not both.
 
@@ -160,7 +181,7 @@ gh auth login
 
 **"No runner tarball found"**
 
-Download from https://github.com/actions/runner/releases - the script auto-detects tarballs matching your OS/architecture.
+Say yes to the auto-download prompt, or run `./runnermaxxer.sh --download`. Manual downloads from https://github.com/actions/runner/releases also work - the script auto-detects tarballs matching your OS/architecture.
 
 **"Token may not have access"**
 
@@ -168,7 +189,19 @@ Ensure your `gh` auth has the `repo` scope (for repository runners) or `admin:or
 
 **Runner shows "offline" on GitHub**
 
-The runner process may have crashed. Check logs with `l` and restart with `r`.
+The supervisor normally recycles these automatically within a couple of minutes. If it persists, check logs with `l` and restart with `r`.
+
+**Runner is quarantined (`✖`)**
+
+It crashed repeatedly in a short window. The failure reason is shown next to it; check logs with `l`, fix the cause, then press `s` to clear the quarantine and retry.
+
+**"Failed to configure runner" on Linux**
+
+Usually missing runner dependencies (libicu etc.). Run the runner's bundled installer: `sudo ./runners/runner-1/bin/installdependencies.sh`
+
+**Orphaned registrations warning**
+
+If unregistering from GitHub fails (e.g. network down during removal), the runner name is recorded in `runners/.orphaned-registrations`. Delete those runners in GitHub Settings → Actions → Runners, then delete the file.
 
 ## License
 
