@@ -19,6 +19,7 @@ VERSION="2.0.0"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/.runnermaxxer.conf"
+TARGETS_FILE="$SCRIPT_DIR/.runnermaxxer.targets"
 
 # Defaults (can be overridden by config file or environment)
 RUNNER_BASE_DIR="${RUNNER_BASE_DIR:-$SCRIPT_DIR/runners}"
@@ -39,6 +40,7 @@ ORPHANS_FILE="$RUNNER_BASE_DIR/.orphaned-registrations"
 LOCK_ACQUIRED=0
 TUI_ACTIVE=0
 RUNNER_TAR=""
+CLI_TARGET=""
 
 # Colors
 RED='\033[0;31m'
@@ -405,50 +407,19 @@ run_onboarding() {
     echo -e "${DIM}Let's configure your self-hosted runner environment.${NC}"
     echo ""
 
-    # Step 1: Target type
+    # Step 1: Target
     echo -e "${BOLD}Step 1: Runner Target${NC}"
-    echo ""
     echo "  Where should runners register?"
-    echo ""
-    echo -e "  ${CYAN}1${NC}) A specific repository"
-    echo -e "  ${CYAN}2${NC}) An entire organization"
-    echo ""
-    printf '  Choice [1/2]: '
-    read -r target_choice
-
-    local new_repo_url=""
-    local new_org_url=""
-
-    case "$target_choice" in
-        1)
-            echo ""
-            echo -e "  ${DIM}Example: https://github.com/myorg/myrepo${NC}"
-            printf '  Repository URL: '
-            read -r new_repo_url
-            new_repo_url=$(normalize_url "$new_repo_url")
-            if ! valid_repo_url "$new_repo_url"; then
-                echo -e "\n  ${RED}Invalid format. Expected: https://github.com/owner/repo${NC}"
-                echo -e "  ${DIM}Run the script again to retry.${NC}"
-                exit 1
-            fi
-            ;;
-        2)
-            echo ""
-            echo -e "  ${DIM}Example: https://github.com/myorg${NC}"
-            printf '  Organization URL: '
-            read -r new_org_url
-            new_org_url=$(normalize_url "$new_org_url")
-            if ! valid_org_url "$new_org_url"; then
-                echo -e "\n  ${RED}Invalid format. Expected: https://github.com/org-name${NC}"
-                echo -e "  ${DIM}Run the script again to retry.${NC}"
-                exit 1
-            fi
-            ;;
-        *)
-            echo -e "\n  ${RED}Invalid choice${NC}"
-            exit 1
-            ;;
-    esac
+    local saved_repo="$REPO_URL" saved_org="$ORG_URL"
+    REPO_URL=""; ORG_URL=""
+    if ! pick_target; then
+        REPO_URL="$saved_repo"; ORG_URL="$saved_org"
+        echo -e "\n  ${RED}No target chosen.${NC}"
+        echo -e "  ${DIM}Run the script again to retry.${NC}"
+        exit 1
+    fi
+    local new_repo_url="$REPO_URL" new_org_url="$ORG_URL"
+    REPO_URL="$saved_repo"; ORG_URL="$saved_org"
 
     # Step 2: Runner name prefix
     echo ""
@@ -546,6 +517,210 @@ get_api_endpoint() {
     else
         echo "orgs/$api_path/actions/runners"
     fi
+}
+
+# ============================================================================
+# Target selection
+# ============================================================================
+# .runnermaxxer.targets lists candidate targets, one per line, as
+# owner/repo, org-name, or a full https://github.com/... URL. Blank lines
+# and '#' comments are ignored. Startup shows these as a menu.
+
+# Expand a targets-file entry to a full URL (empty for blanks/comments)
+target_entry_to_url() {
+    local e="$1"
+    e="${e#"${e%%[![:space:]]*}"}"
+    e="${e%"${e##*[![:space:]]}"}"
+    [[ -z "$e" || "$e" == \#* ]] && { echo ""; return 0; }
+    case "$e" in
+        https://github.com/*) ;;
+        http://github.com/*)  e="https://${e#http://}" ;;
+        github.com/*)         e="https://$e" ;;
+        *)                    e="https://github.com/$e" ;;
+    esac
+    normalize_url "$e"
+}
+
+# Print valid target URLs from the targets file, one per line
+load_targets() {
+    local line url
+    [[ -f "$TARGETS_FILE" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        url=$(target_entry_to_url "$line")
+        [[ -z "$url" ]] && continue
+        if valid_repo_url "$url" || valid_org_url "$url"; then
+            echo "$url"
+        else
+            warn "Ignoring invalid entry in $(basename "$TARGETS_FILE"): $line"
+        fi
+    done < "$TARGETS_FILE"
+}
+
+# Short display form: owner/repo, or "org (organization)"
+target_label() {
+    local path="${1#https://github.com/}"
+    if valid_org_url "$1"; then
+        echo "$path (organization)"
+    else
+        echo "$path"
+    fi
+}
+
+# Set REPO_URL/ORG_URL from a URL or owner/repo entry. 1 if not valid.
+set_target() {
+    local url
+    url=$(target_entry_to_url "$1")
+    if valid_repo_url "$url"; then
+        REPO_URL="$url"; ORG_URL=""
+    elif valid_org_url "$url"; then
+        ORG_URL="$url"; REPO_URL=""
+    else
+        return 1
+    fi
+    return 0
+}
+
+# Interactive picker. Shows the targets file as a numbered menu with the
+# current target preselected, plus a manual-entry option. Sets
+# REPO_URL/ORG_URL. Returns 0 when a target is set, 1 when nothing chosen.
+pick_target() {
+    local current targets=() t i choice url
+    current=$(get_target_url)
+
+    while IFS= read -r t; do
+        [[ -n "$t" ]] && targets[${#targets[@]}]="$t"
+    done < <(load_targets)
+
+    echo ""
+    echo -e "  ${BOLD}Runner target${NC}"
+    if [[ ${#targets[@]} -eq 0 ]]; then
+        echo -e "  ${DIM}Tip: list repos/orgs in $(basename "$TARGETS_FILE") to pick from a menu${NC}"
+    else
+        echo ""
+        i=0
+        local default_idx=""
+        for t in "${targets[@]}"; do
+            i=$((i + 1))
+            if [[ "$t" == "$current" ]]; then
+                default_idx=$i
+                echo -e "  ${CYAN}$i${NC}) $(target_label "$t") ${GREEN}(current)${NC}"
+            else
+                echo -e "  ${CYAN}$i${NC}) $(target_label "$t")"
+            fi
+        done
+        echo -e "  ${CYAN}m${NC}) Enter a repository or organization manually"
+        echo ""
+        if [[ -n "$default_idx" ]]; then
+            printf '  Choice [%s]: ' "$default_idx"
+        elif [[ -n "$current" ]]; then
+            echo -e "  ${DIM}Current target $(target_label "$current") is not in the list; Enter keeps it${NC}"
+            printf '  Choice [keep current]: '
+        else
+            printf '  Choice: '
+        fi
+        read -r choice || true
+
+        if [[ -z "$choice" ]]; then
+            [[ -n "$current" ]] && return 0
+            echo -e "  ${YELLOW}No target selected${NC}"
+            return 1
+        fi
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 && "$choice" -le ${#targets[@]} ]]; then
+            set_target "${targets[$((choice - 1))]}"
+            return 0
+        fi
+        if [[ ! "$choice" =~ ^[Mm]$ ]]; then
+            echo -e "  ${YELLOW}Invalid choice${NC}"
+            [[ -n "$current" ]] && return 0
+            return 1
+        fi
+    fi
+
+    echo ""
+    echo -e "  ${DIM}owner/repo, org-name, or https://github.com/...${NC}"
+    if [[ -n "$current" ]]; then
+        printf '  Target [%s]: ' "$(target_label "$current")"
+    else
+        printf '  Target: '
+    fi
+    read -r url || true
+    if [[ -z "$url" ]]; then
+        [[ -n "$current" ]] && return 0
+        echo -e "  ${YELLOW}No target entered${NC}"
+        return 1
+    fi
+    if ! set_target "$url"; then
+        echo -e "  ${YELLOW}Invalid target (expected owner/repo, org-name, or a github.com URL)${NC}"
+        [[ -n "$current" ]] && return 0
+        return 1
+    fi
+    return 0
+}
+
+# URL a runner is registered to, from its .runner state file
+runner_registered_url() {
+    sed -n 's/.*"gitHubUrl": *"\([^"]*\)".*/\1/p' "$RUNNER_BASE_DIR/runner-$1/.runner" 2>/dev/null | head -1 || true
+}
+
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+# Runners keep serving whatever they were registered to, regardless of the
+# config file. After a target change, unregister stale runners from the old
+# target and set them up again on the new one; those that were up come back
+# up, those that were down stay down.
+retarget_runners() {
+    local target_url id reg stale=() busy=""
+    target_url=$(get_target_url)
+    [[ -z "$target_url" ]] && return 0
+
+    for id in $(get_runner_ids); do
+        reg=$(runner_registered_url "$id")
+        [[ -z "$reg" ]] && continue
+        if [[ "$(lower "$reg")" != "$(lower "$target_url")" ]]; then
+            stale[${#stale[@]}]="$id"
+            is_busy "$id" && busy="$busy runner-$id"
+        fi
+    done
+    [[ ${#stale[@]} -eq 0 ]] && return 0
+
+    echo ""
+    echo -e "  ${YELLOW}${#stale[@]} runner(s) are registered to a different target"\
+            "(e.g. $(runner_registered_url "${stale[0]}"))${NC}"
+    [[ -n "$busy" ]] && echo -e "  ${YELLOW}Jobs in progress on:$busy - they will be interrupted${NC}"
+    printf '  Re-register them to %s? [Y/n]: ' "$(target_label "$target_url")"
+    local ans=""
+    read -r ans || true
+    if [[ "$ans" =~ ^[Nn] ]]; then
+        echo -e "  ${DIM}Left as-is: they keep serving their old target until re-registered${NC}"
+        sleep 1
+        return 0
+    fi
+
+    local was_running ok=0 failed=0
+    for id in "${stale[@]}"; do
+        was_running=0
+        is_running "$id" && was_running=1
+        echo -e "  Re-registering runner-$id..."
+        remove_runner "$id"
+        if setup_runner "$id"; then
+            ok=$((ok + 1))
+            if [[ "$was_running" == "1" ]]; then
+                clear_failure_state "$id"
+                start_runner "$id" || true
+            else
+                mark_stopped "$id"
+            fi
+        else
+            failed=$((failed + 1))
+        fi
+    done
+    if [[ $failed -gt 0 ]]; then
+        echo -e "  ${GREEN}$ok re-registered${NC}, ${RED}$failed failed${NC}"
+    else
+        echo -e "  ${GREEN}$ok re-registered${NC}"
+    fi
+    sleep 1
+    return 0
 }
 
 # ============================================================================
@@ -1478,41 +1653,30 @@ edit_config() {
 
     echo -e "  Current target: ${DIM}$(get_target_url || echo 'none')${NC}"
     echo ""
-    echo -e "  ${CYAN}1${NC}) Configure for a repository"
-    echo -e "  ${CYAN}2${NC}) Configure for an organization"
-    echo -e "  ${CYAN}3${NC}) Change runner name prefix (current: $RUNNER_NAME_PREFIX)"
-    echo -e "  ${CYAN}4${NC}) Cancel"
+    echo -e "  ${CYAN}1${NC}) Change target (repository or organization)"
+    echo -e "  ${CYAN}2${NC}) Change runner name prefix (current: $RUNNER_NAME_PREFIX)"
+    echo -e "  ${CYAN}3${NC}) Cancel"
     echo ""
     printf '  Choice: '
     read -rsn1 choice
+    echo ""
 
     case "$choice" in
         1)
-            printf '\n  Repository URL (e.g., https://github.com/owner/repo): '
-            read -r url
-            url=$(normalize_url "$url")
-            if valid_repo_url "$url"; then
-                REPO_URL="$url"
-                ORG_URL=""
+            local before
+            before=$(get_target_url)
+            if pick_target && [[ "$(get_target_url)" != "$before" ]]; then
                 save_config
-            else
-                echo -e "  ${YELLOW}Invalid URL (expected https://github.com/owner/repo)${NC}"
+                if validate_token; then
+                    retarget_runners
+                else
+                    echo -e "  ${YELLOW}Warning: token cannot access $(get_target_url) - check gh auth scopes${NC}"
+                    echo -e "  ${DIM}Existing runners were left on their old target${NC}"
+                fi
             fi
             ;;
         2)
-            printf '\n  Organization URL (e.g., https://github.com/myorg): '
-            read -r url
-            url=$(normalize_url "$url")
-            if valid_org_url "$url"; then
-                ORG_URL="$url"
-                REPO_URL=""
-                save_config
-            else
-                echo -e "  ${YELLOW}Invalid URL (expected https://github.com/org-name)${NC}"
-            fi
-            ;;
-        3)
-            printf '\n  Runner name prefix: '
+            printf '  Runner name prefix: '
             read -r prefix
             if [[ -n "$prefix" ]]; then
                 if valid_prefix "$prefix"; then
@@ -1574,6 +1738,12 @@ case "${1:-}" in
         download_runner_tarball || exit 1
         exit 0
         ;;
+    --target|-t)
+        [[ -n "${2:-}" ]] || die "--target needs a value (owner/repo, org, or URL)"
+        CLI_TARGET="$2"
+        shift 2
+        [[ -n "${1:-}" ]] && die "Unknown option: $1 (see --help)"
+        ;;
     --version|-v)
         echo "gh-runnermaxxer $VERSION"
         exit 0
@@ -1586,12 +1756,14 @@ case "${1:-}" in
         echo "Options:"
         echo "  --setup, -s     Run interactive setup wizard"
         echo "  --download, -d  Download the latest runner tarball for this platform"
+        echo "  --target, -t X  Use target X (owner/repo, org, or URL) and skip the target menu"
         echo "  --version, -v   Print version"
         echo "  --help, -h      Show this help message"
         echo ""
         echo "Configuration:"
         echo "  Copy .runnermaxxer.conf.sample to .runnermaxxer.conf"
         echo "  Or run with --setup for interactive configuration"
+        echo "  List repos/orgs in .runnermaxxer.targets to choose one at startup"
         echo ""
         exit 0
         ;;
@@ -1634,6 +1806,17 @@ if [[ "$needs_onboarding" == "true" ]]; then
     load_config
 fi
 
+# Target selection: --target wins; otherwise offer the targets-file menu
+startup_target_before=$(get_target_url)
+if [[ -n "$CLI_TARGET" ]]; then
+    set_target "$CLI_TARGET" || die "Invalid --target: $CLI_TARGET (expected owner/repo, org, or URL)"
+elif [[ "$needs_onboarding" != "true" ]] && [[ -n "$(load_targets)" ]]; then
+    pick_target || true
+fi
+if [[ "$(get_target_url)" != "$startup_target_before" ]]; then
+    save_config
+fi
+
 echo -e "${DIM}Running preflight checks...${NC}"
 preflight_checks
 
@@ -1641,7 +1824,10 @@ preflight_checks
 reconcile_state
 
 if [[ -n "$(get_target_url)" ]]; then
-    if ! validate_token; then
+    if validate_token; then
+        # Existing runners may still be registered to a previous target
+        retarget_runners
+    else
         echo -e "${YELLOW}Warning: token cannot access $(get_target_url) - check gh auth scopes${NC}"
         sleep 1
     fi

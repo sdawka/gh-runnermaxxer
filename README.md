@@ -33,6 +33,7 @@ A TUI for managing multiple GitHub Actions self-hosted runners on a single machi
 - **Auto-detect labels** based on system capabilities (OS, arch, memory, GPU, Docker, WSL, etc.)
 - **Live status** showing what each runner is doing (idle, running job, errors, quarantined)
 - **Works with repos or orgs** - configure once, spin up runners
+- **Target menu at startup** - list the repos/orgs you switch between in `.runnermaxxer.targets` and pick one when the script starts (or pass `--target owner/repo`); runners still registered to the previous target are unregistered and re-registered automatically
 - **Uses `gh` CLI** for authentication - no PAT management needed
 
 ## Requirements
@@ -121,6 +122,7 @@ Runners are detached processes: quitting the manager can leave them running (you
 Options:
   --setup, -s     Run interactive setup wizard
   --download, -d  Download the latest runner tarball for this platform
+  --target, -t X  Use target X (owner/repo, org, or URL) and skip the target menu
   --version, -v   Print version
   --help, -h      Show help message
 ```
@@ -157,6 +159,22 @@ cp .runnermaxxer.conf.sample .runnermaxxer.conf
 
 **Note:** Set only ONE of `REPO_URL` or `ORG_URL`, not both.
 
+### Switching Between Targets
+
+Self-hosted runners register against exactly one repository or organization. GitHub has no account-wide runners for personal accounts, so to share a machine across repos you either register at the organization level (`ORG_URL`) or switch the target when needed.
+
+To make switching quick, list your targets in `.runnermaxxer.targets` (see `.runnermaxxer.targets.sample`), one per line as `owner/repo`, `org-name`, or a full URL:
+
+```
+sdawka/mountpain
+myorg/other-repo
+myorg
+```
+
+On startup the script shows these as a numbered menu with the current target preselected (Enter keeps it). `./runnermaxxer.sh --target owner/repo` skips the menu. Pressing `e` in the TUI opens the same picker.
+
+When the target changes, existing runners are still registered to the old one, so the script offers to re-register them: each stale runner is stopped, unregistered from the old target, set up again on the new one, and restarted if it was running. Runners busy with a job are listed in the prompt so you can decline and wait.
+
 ## Directory Structure
 
 ```
@@ -165,6 +183,7 @@ gh-runnermaxxer/
 ├── actions-runner-*.tar.gz      # Runner tarball (you download this)
 ├── .runnermaxxer.conf.sample    # Sample configuration
 ├── .runnermaxxer.conf           # Your configuration (auto-created via setup)
+├── .runnermaxxer.targets        # Optional list of repos/orgs for the startup menu
 └── runners/                     # Runner instances (auto-created)
     ├── runner-1/
     ├── runner-2/

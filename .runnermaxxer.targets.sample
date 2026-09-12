@@ -1,0 +1,7 @@
+# gh-runnermaxxer targets
+# Copy to .runnermaxxer.targets and list the repos/orgs you switch between.
+# One per line: owner/repo, org-name, or a full https://github.com/... URL.
+# At startup these are offered as a menu (current target preselected).
+your-org/your-repo
+your-org/another-repo
+your-org

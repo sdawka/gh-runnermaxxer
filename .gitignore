@@ -6,6 +6,7 @@ runners/
 
 # Configuration (may contain URLs)
 .runnermaxxer.conf
+.runnermaxxer.targets
 
 # npm cache
 .npm/
