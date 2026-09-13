@@ -7,16 +7,30 @@ A TUI for managing multiple GitHub Actions self-hosted runners on a single machi
   ║            gh-runnermaxxer                        ║
   ╚═══════════════════════════════════════════════════╝
 
-  Target: https://github.com/myorg/myrepo
   Labels: macos, arm64, apple-silicon, docker, high-memory
 
   Status: 3 running / 4 configured
 
-  Runners:
+  myorg/myrepo
     ● runner-1 PID 12345 [running: build-and-test]
     ● runner-2 PID 12346 [idle]
+  myorg/other-repo
     ● runner-3 PID 12347 [idle (done)]
     ○ runner-4 stopped
+  myorg (organization)  (no runners)
+```
+
+One instance manages runners for any number of repositories and organizations. At startup a project menu lets you pick how many runners each one gets:
+
+```
+  Projects   runners: 4 (max 20)
+
+  ▸ myorg/myrepo                             [◂  2 ▸]
+    myorg/other-repo                         [   2  ]
+    myorg (organization)                     [   1  ]  0 → 1
+
+  ↑/↓ choose project      ←/→ runners (or +/-, 0-9)
+  a add project   x remove from list   Enter/s apply & continue   q quit
 ```
 
 ## Features
@@ -32,8 +46,8 @@ A TUI for managing multiple GitHub Actions self-hosted runners on a single machi
 - **Scale runners up/down** with a single keypress - scale-down prefers idle runners and warns before killing one mid-job
 - **Auto-detect labels** based on system capabilities (OS, arch, memory, GPU, Docker, WSL, etc.)
 - **Live status** showing what each runner is doing (idle, running job, errors, quarantined)
-- **Works with repos or orgs** - configure once, spin up runners
-- **Target menu at startup** - list the repos/orgs you switch between in `.runnermaxxer.targets` and pick one when the script starts (or pass `--target owner/repo`); runners still registered to the previous target are unregistered and re-registered automatically
+- **Multiple projects in one instance** - run runners for several repositories and organizations side by side; each runner is registered to exactly one of them and the dashboard groups runners by project
+- **Project menu at startup** - arrow-key menu listing your projects from `.runnermaxxer.targets`: ↑/↓ picks a project, ←/→ sets its runner count; `a` adds a new repo/org on the spot; Enter applies by adding or removing runners per project
 - **Uses `gh` CLI** for authentication - no PAT management needed
 
 ## Requirements
@@ -55,11 +69,11 @@ Not supported: Windows (the Windows runner uses a different install flow), Alpin
    ./runnermaxxer.sh
    ```
 
-2. **Configure** - on first run, an interactive setup wizard guides you through configuration
+2. **Configure** - on first run, an interactive setup wizard asks for a runner name prefix and a global runner cap
 
 3. **Runner tarball** - if none is present, the script offers to download the latest release for your platform (checksum-verified). You can also fetch it explicitly with `./runnermaxxer.sh --download`, or download manually from [actions/runner releases](https://github.com/actions/runner/releases)
 
-4. **Add runners** - press `+` or use `n` to scale to a specific count
+4. **Pick projects and counts** - in the startup menu press `a` to add a repository or organization, use ↑/↓ to pick it and ←/→ to set how many runners it gets, then Enter to apply and open the dashboard
 
 ## Usage
 
@@ -70,7 +84,7 @@ Not supported: Windows (the Windows runner uses a different install flow), Alpin
 | `s` | Start all runners |
 | `x` | Stop all runners |
 | `r` | Restart all runners |
-| `n` | Scale to N runners |
+| `t` | Projects & scaling menu (add repos/orgs, set runner counts) |
 | `l` | View runner logs |
 | `c` | Check GitHub runner status |
 | `e` | Edit configuration |
@@ -122,7 +136,8 @@ Runners are detached processes: quitting the manager can leave them running (you
 Options:
   --setup, -s     Run interactive setup wizard
   --download, -d  Download the latest runner tarball for this platform
-  --target, -t X  Use target X (owner/repo, org, or URL) and skip the target menu
+  --target, -t X  Add project X (owner/repo, org, or URL) to the list and highlight it
+  --no-menu       Skip the project menu at startup and go straight to the dashboard
   --version, -v   Print version
   --help, -h      Show help message
 ```
@@ -131,9 +146,10 @@ Options:
 
 On first run (or with `--setup`), an interactive wizard guides you through setup:
 
-1. Choose target: repository or organization
-2. Set runner name prefix (default: hostname)
-3. Set maximum runners (default: 20)
+1. Set runner name prefix (default: hostname)
+2. Set maximum runners across all projects (default: 20)
+
+Projects themselves are chosen in the menu that follows (see [Multiple Projects](#multiple-projects)).
 
 Configuration is validated on startup. If issues are detected (invalid URLs, bad values), you'll be prompted to fix them.
 
@@ -148,22 +164,20 @@ cp .runnermaxxer.conf.sample .runnermaxxer.conf
 
 | Variable | Description |
 |----------|-------------|
-| `REPO_URL` | Repository URL (e.g., `https://github.com/owner/repo`) |
-| `ORG_URL` | Organization URL (e.g., `https://github.com/myorg`) |
 | `RUNNER_NAME_PREFIX` | Prefix for runner names (default: hostname) |
-| `MAX_RUNNERS` | Maximum runners allowed (default: 20) |
+| `MAX_RUNNERS` | Maximum runners allowed across all projects (default: 20) |
 | `REFRESH_INTERVAL` | Seconds between automatic status refreshes (default: 5) |
 | `MAX_RESTART_ATTEMPTS` | Consecutive crashes before a runner is quarantined (default: 5) |
 | `MAX_LOG_SIZE_MB` | Truncate runner logs past this size (default: 10) |
 | `GH_HEALTH_TICKS` | GitHub-side health check every N ticks, 0 to disable (default: 12) |
 
-**Note:** Set only ONE of `REPO_URL` or `ORG_URL`, not both.
+Older configs that still contain `REPO_URL`/`ORG_URL` are migrated automatically: the URL is appended to `.runnermaxxer.targets` and removed from the config.
 
-### Switching Between Targets
+### Multiple Projects
 
-Self-hosted runners register against exactly one repository or organization. GitHub has no account-wide runners for personal accounts, so to share a machine across repos you either register at the organization level (`ORG_URL`) or switch the target when needed.
+Each self-hosted runner registers against exactly one repository or organization. To serve several projects from one machine you run several runners, and a single manager instance supervises all of them (the lock file prevents a second instance on purpose).
 
-To make switching quick, list your targets in `.runnermaxxer.targets` (see `.runnermaxxer.targets.sample`), one per line as `owner/repo`, `org-name`, or a full URL:
+Projects are listed in `.runnermaxxer.targets` (see `.runnermaxxer.targets.sample`), one per line as `owner/repo`, `org-name`, or a full URL:
 
 ```
 sdawka/mountpain
@@ -171,9 +185,22 @@ myorg/other-repo
 myorg
 ```
 
-On startup the script shows these as a numbered menu with the current target preselected (Enter keeps it). `./runnermaxxer.sh --target owner/repo` skips the menu. Pressing `e` in the TUI opens the same picker.
+You rarely need to edit it by hand: the **project menu** at startup (and `t` in the dashboard) manages it.
 
-When the target changes, existing runners are still registered to the old one, so the script offers to re-register them: each stale runner is stopped, unregistered from the old target, set up again on the new one, and restarted if it was running. Runners busy with a job are listed in the prompt so you can decline and wait.
+| Key | Action |
+|-----|--------|
+| `↑`/`↓` (or `k`/`j`) | Move between projects |
+| `←`/`→` (or `h`/`l`, `+`/`-`, `0`-`9`) | Change the highlighted project's runner count |
+| `a` | Add a repository or organization (also appended to `.runnermaxxer.targets`) |
+| `x` | Remove the highlighted project from the list (only when it has no runners) |
+| `Enter` / `s` | Apply: each project is scaled up or down to the chosen count, then open the dashboard |
+| `q` | Quit (at startup) or go back (from the dashboard) |
+
+Applying scales each project independently: new runners are registered to that project, and scale-downs unregister idle runners first (you are warned before a busy runner is killed). The counts shown come from the runner directories on disk, so a project set to `0` simply has no runners; setting it back up re-registers fresh ones. Runners registered to a project that is not in the targets file still appear (marked as such) so they can be scaled down.
+
+`./runnermaxxer.sh --target owner/repo` adds a project from the command line and highlights it in the menu; `--no-menu` skips the menu when the current runners are already what you want.
+
+In the dashboard, `+` asks which project to add a runner to when there is more than one; `-` removes a runner by number regardless of project.
 
 ## Directory Structure
 
@@ -183,7 +210,7 @@ gh-runnermaxxer/
 ├── actions-runner-*.tar.gz      # Runner tarball (you download this)
 ├── .runnermaxxer.conf.sample    # Sample configuration
 ├── .runnermaxxer.conf           # Your configuration (auto-created via setup)
-├── .runnermaxxer.targets        # Optional list of repos/orgs for the startup menu
+├── .runnermaxxer.targets        # Projects (repos/orgs) shown in the startup menu
 └── runners/                     # Runner instances (auto-created)
     ├── runner-1/
     ├── runner-2/

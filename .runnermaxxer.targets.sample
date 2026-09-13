@@ -1,7 +1,8 @@
 # gh-runnermaxxer targets
-# Copy to .runnermaxxer.targets and list the repos/orgs you switch between.
+# Copy to .runnermaxxer.targets and list the repos/orgs to run runners for.
 # One per line: owner/repo, org-name, or a full https://github.com/... URL.
-# At startup these are offered as a menu (current target preselected).
+# The startup menu shows these and lets you set a runner count for each;
+# pressing 'a' there appends new entries to this file for you.
 your-org/your-repo
 your-org/another-repo
 your-org
