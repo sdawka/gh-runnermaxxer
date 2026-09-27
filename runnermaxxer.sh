@@ -635,41 +635,6 @@ known_targets() {
     return 0
 }
 
-# Prompt for a project when there is more than one; sets CHOSEN_TARGET.
-# Returns 1 when nothing was chosen.
-CHOSEN_TARGET=""
-choose_target() {
-    local prompt="$1" targets=() t i=0 choice
-    CHOSEN_TARGET=""
-    while IFS= read -r t; do
-        [[ -n "$t" ]] && targets[${#targets[@]}]="$t"
-    done < <(known_targets)
-
-    if [[ ${#targets[@]} -eq 0 ]]; then
-        echo -e "\n  ${YELLOW}No projects yet - press 't' to add one${NC}"
-        sleep 2
-        return 1
-    fi
-    if [[ ${#targets[@]} -eq 1 ]]; then
-        CHOSEN_TARGET="${targets[0]}"
-        return 0
-    fi
-
-    echo ""
-    for t in "${targets[@]}"; do
-        i=$((i + 1))
-        echo -e "  ${CYAN}$i${NC}) $(target_label "$t")"
-    done
-    printf '  %s [1-%d]: ' "$prompt" "${#targets[@]}"
-    read -r choice || true
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [[ "$choice" -ge 1 && "$choice" -le ${#targets[@]} ]]; then
-        CHOSEN_TARGET="${targets[$((choice - 1))]}"
-        return 0
-    fi
-    [[ -n "$choice" ]] && { echo -e "  ${YELLOW}Invalid choice${NC}"; sleep 1; }
-    return 1
-}
-
 # Idle/stopped runners of a target first, then busy ones; highest ID first
 # within each class. Prints up to N runner IDs.
 pick_victims() {
@@ -953,12 +918,17 @@ render_target_menu() {
     return 0
 }
 
-# One keypress, decoded: up/down/left/right/enter/space/esc/quit or the char
+# One keypress, decoded: up/down/left/right/enter/space/esc/quit or the char.
+# $1 (optional): seconds to wait for the first byte; prints "tick" on timeout.
 read_key() {
-    local k="" rest="" t=1
+    local k="" rest="" t=1 wait="${1:-}"
     # Fractional read timeouts need bash 4; on 3.2 a bare Esc takes 1s
     [[ "${BASH_VERSINFO[0]}" -ge 4 ]] && t=0.1
-    IFS= read -rsn1 k || { echo "quit"; return 0; }
+    if [[ -n "$wait" ]]; then
+        IFS= read -rsn1 -t "$wait" k || { echo "tick"; return 0; }
+    else
+        IFS= read -rsn1 k || { echo "quit"; return 0; }
+    fi
     if [[ "$k" == $'\x1b' ]]; then
         IFS= read -rsn2 -t "$t" rest || rest=""
         case "$rest" in
@@ -975,6 +945,95 @@ read_key() {
         " ") echo space ;;
         *)   echo "$k" ;;
     esac
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Generic arrow-key picker
+# ----------------------------------------------------------------------------
+# Caller fills PICK_ITEMS (display text, may contain colour codes) and,
+# optionally, PICK_HEADERS (a group header printed above item i, or "").
+# pick_item "Title" "verb" then lets the user move with ↑/↓ (or j/k),
+# jump with 1-9, confirm with Enter and cancel with q/Esc. On return
+# PICK_INDEX holds the chosen index, or -1 when cancelled (exit 1).
+
+PICK_ITEMS=(); PICK_HEADERS=(); PICK_INDEX=-1
+
+render_pick_list() {
+    local title="$1" verb="$2" i
+    echo -e "${BOLD}${CYAN}"
+    echo "  ╔═══════════════════════════════════════════════════╗"
+    echo "  ║            gh-runnermaxxer                        ║"
+    echo -e "  ╚═══════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  ${BOLD}$title${NC}"
+    [[ -z "${PICK_HEADERS[0]:-}" ]] && echo ""
+    for ((i = 0; i < ${#PICK_ITEMS[@]}; i++)); do
+        if [[ -n "${PICK_HEADERS[i]:-}" ]]; then
+            echo ""
+            echo -e "  ${BOLD}${PICK_HEADERS[i]}${NC}"
+        fi
+        if [[ $i -eq $PICK_INDEX ]]; then
+            echo -e "  ${CYAN}▸${NC} ${PICK_ITEMS[i]}"
+        else
+            echo -e "    ${PICK_ITEMS[i]}"
+        fi
+    done
+    echo ""
+    echo -e "  ${BOLD}────────────────────────────────────────────────────${NC}"
+    echo -e "  ${CYAN}↑/↓${NC} choose   ${CYAN}Enter${NC} $verb   ${CYAN}q${NC}/${CYAN}Esc${NC} cancel"
+    return 0
+}
+
+pick_item() {
+    local title="$1" verb="$2" n=${#PICK_ITEMS[@]} key
+    PICK_INDEX=0
+    [[ $n -eq 0 ]] && { PICK_INDEX=-1; return 1; }
+
+    tput civis 2>/dev/null || true
+    while true; do
+        draw_frame "$(render_pick_list "$title" "$verb")"
+        key=$(read_key)
+        case "$key" in
+            up|k|K)   [[ $PICK_INDEX -gt 0 ]] && PICK_INDEX=$((PICK_INDEX - 1)) ;;
+            down|j|J) [[ $PICK_INDEX -lt $((n - 1)) ]] && PICK_INDEX=$((PICK_INDEX + 1)) ;;
+            [1-9])    [[ $key -le $n ]] && PICK_INDEX=$((key - 1)) ;;
+            enter|space)
+                tput cnorm 2>/dev/null || true
+                clear
+                return 0
+                ;;
+            q|Q|esc|quit)
+                tput cnorm 2>/dev/null || true
+                PICK_INDEX=-1
+                clear
+                return 1
+                ;;
+        esac
+    done
+}
+
+# Fill PICK_ITEMS/PICK_HEADERS with every runner, grouped by project, with
+# its live status. PICK_IDS[i] is the runner ID behind row i.
+PICK_IDS=()
+build_runner_pick_list() {
+    local t ids id header
+    PICK_ITEMS=(); PICK_HEADERS=(); PICK_IDS=()
+    pick_add_group() {
+        # $1: header, rest: runner IDs
+        header="$1"; shift
+        for id in "$@"; do
+            PICK_HEADERS[${#PICK_ITEMS[@]}]="$header"; header=""
+            PICK_IDS[${#PICK_IDS[@]}]="$id"
+            PICK_ITEMS[${#PICK_ITEMS[@]}]="$(render_runner_line "$id" | sed 's/^    //')"
+        done
+    }
+    for t in $(known_targets); do
+        ids=$(runner_ids_for_target "$t")
+        [[ -n "$ids" ]] && pick_add_group "$(target_label "$t")" $ids
+    done
+    ids=$(unassigned_runner_ids)
+    [[ -n "$ids" ]] && pick_add_group "${YELLOW}Unconfigured (incomplete setup)${NC}" $ids
     return 0
 }
 
@@ -1258,25 +1317,28 @@ get_runner_status() {
     recent=$(tail -50 "$log_file" 2>/dev/null || echo "")
     [[ -z "$recent" ]] && { echo "no logs"; return 0; }
 
-    if echo "$recent" | grep -q "Running job:"; then
-        local job_name
-        job_name=$(echo "$recent" | grep "Running job:" | tail -1 | sed 's/.*Running job: //' | cut -c1-25)
-        echo "running: $job_name"
-    elif echo "$recent" | grep -q "Listening for Jobs"; then
-        echo "idle"
-    elif echo "$recent" | grep -q "Job .* completed"; then
-        echo "idle (done)"
-    elif echo "$recent" | grep -q "Could not connect"; then
-        echo "connection error"
-    elif echo "$recent" | grep -q "Authentication failed"; then
-        echo "auth error"
-    elif echo "$recent" | grep -q "Starting Runner listener"; then
-        echo "starting..."
-    elif echo "$recent" | grep -q "Exiting runner"; then
-        echo "exiting"
-    else
-        echo "unknown"
-    fi
+    # Only the most recent lifecycle event counts. The runner does not log
+    # "Listening for Jobs" again after a job finishes, so an older
+    # "Running job:" line must never outrank a later "completed" line.
+    local last
+    last=$(echo "$recent" \
+        | grep -E 'Running job:|Job .* completed with result|Listening for Jobs|Could not connect|Authentication failed|Starting Runner listener|Exiting runner' \
+        | tail -1)
+
+    case "$last" in
+        *"Running job:"*)
+            local job_name
+            job_name=$(echo "$last" | sed 's/.*Running job: //' | cut -c1-25)
+            echo "running: $job_name"
+            ;;
+        *"Listening for Jobs"*)          echo "idle" ;;
+        *"completed with result: "*)     echo "idle (last: ${last##*completed with result: })" ;;
+        *"Could not connect"*)           echo "connection error" ;;
+        *"Authentication failed"*)       echo "auth error" ;;
+        *"Starting Runner listener"*)    echo "starting..." ;;
+        *"Exiting runner"*)              echo "exiting" ;;
+        *)                               echo "unknown" ;;
+    esac
 }
 
 is_busy() {
@@ -1635,10 +1697,14 @@ render_runner_line() {
 }
 
 render_ui() {
-    local total running disk_mb t ids id any=0
+    local total running disk_mb t ids id any=0 i name box tag pending=0 want
 
     total=$(get_runner_count)
     running=$(count_running)
+    want=$(menu_total_want)
+    for ((i = 0; i < ${#M_URLS[@]}; i++)); do
+        [[ ${M_WANT[i]} -ne ${M_CUR[i]} ]] && pending=1
+    done
 
     echo -e "${BOLD}${CYAN}"
     echo "  ╔═══════════════════════════════════════════════════╗"
@@ -1647,7 +1713,11 @@ render_ui() {
     echo ""
     echo -e "  ${DIM}Labels: ${CACHED_LABELS}${NC}"
     echo ""
-    echo -e "  ${BOLD}Status:${NC} ${GREEN}$running running${NC} / $total configured"
+    if [[ $pending -eq 1 ]]; then
+        echo -e "  ${BOLD}Status:${NC} ${GREEN}$running running${NC} / $total configured  ${YELLOW}→ $want after apply${NC} ${DIM}(max $MAX_RUNNERS)${NC}"
+    else
+        echo -e "  ${BOLD}Status:${NC} ${GREEN}$running running${NC} / $total configured ${DIM}(max $MAX_RUNNERS)${NC}"
+    fi
 
     disk_mb=$(free_disk_mb)
     if [[ "$disk_mb" -lt 1024 ]]; then
@@ -1658,16 +1728,29 @@ render_ui() {
     fi
     echo ""
 
-    # Runners grouped by project
-    for t in $(known_targets); do
+    # Runners grouped by project; ↑/↓ moves the selector, ←/→ changes the
+    # selected project's runner count (applied with Enter)
+    for ((i = 0; i < ${#M_URLS[@]}; i++)); do
         any=1
-        ids=$(runner_ids_for_target "$t")
-        if [[ -z "$ids" ]]; then
-            echo -e "  ${DIM}$(target_label "$t")  (no runners)${NC}"
-            continue
+        t="${M_URLS[i]}"
+        name=$(target_label "$t")
+        [[ ${#name} -gt 40 ]] && name="${name:0:37}..."
+        if [[ $i -eq $M_SEL ]]; then
+            box=$(printf "${BOLD}${CYAN}◂ %2d ▸${NC}" "${M_WANT[i]}")
+        else
+            box=$(printf "  %2d  " "${M_WANT[i]}")
         fi
-        echo -e "  ${BOLD}$(target_label "$t")${NC}"
-        for id in $ids; do
+        tag=""
+        [[ ${M_WANT[i]} -ne ${M_CUR[i]} ]] && tag="  ${YELLOW}${M_CUR[i]} → ${M_WANT[i]}${NC}"
+        [[ ${M_LISTED[i]} -eq 0 ]] && tag="$tag  ${DIM}(not in targets file)${NC}"
+        if [[ $i -eq $M_SEL ]]; then
+            printf "  ${CYAN}▸${NC} ${BOLD}%-40s${NC} [%s]%b\n" "$name" "$box" "$tag"
+        elif [[ ${M_CUR[i]} -eq 0 ]]; then
+            printf "    ${DIM}%-40s${NC} [%s]%b\n" "$name" "$box" "$tag"
+        else
+            printf "    ${BOLD}%-40s${NC} [%s]%b\n" "$name" "$box" "$tag"
+        fi
+        for id in $(runner_ids_for_target "$t"); do
             render_runner_line "$id"
         done
     done
@@ -1675,7 +1758,7 @@ render_ui() {
     ids=$(unassigned_runner_ids)
     if [[ -n "$ids" ]]; then
         any=1
-        echo -e "  ${YELLOW}Unconfigured (incomplete setup - remove with '-')${NC}"
+        echo -e "  ${YELLOW}Unconfigured (incomplete setup - remove with 'd')${NC}"
         for id in $ids; do
             render_runner_line "$id"
         done
@@ -1687,12 +1770,23 @@ render_ui() {
 
     echo ""
     echo -e "  ${BOLD}────────────────────────────────────────────────────${NC}"
+    echo -e "  ${CYAN}↑/↓${NC} choose project      ${CYAN}←/→${NC} runners (or ${CYAN}+/-${NC}, ${CYAN}0-9${NC})"
+    if [[ $pending -eq 1 ]]; then
+        echo -e "  ${CYAN}Enter${NC} ${YELLOW}apply changes${NC}       ${CYAN}Esc${NC} discard changes"
+    else
+        echo -e "  ${CYAN}Enter${NC} apply changes"
+    fi
+    echo ""
     echo -e "  ${BOLD}Commands:${NC}"
-    echo -e "    ${CYAN}+${NC}  Add runner          ${CYAN}-${NC}  Remove runner"
+    echo -e "    ${CYAN}d${NC}  Remove a runner     ${CYAN}l${NC}  View logs"
     echo -e "    ${CYAN}s${NC}  Start all           ${CYAN}x${NC}  Stop all"
-    echo -e "    ${CYAN}r${NC}  Restart all         ${CYAN}l${NC}  View logs"
-    echo -e "    ${CYAN}t${NC}  Projects & scaling  ${CYAN}c${NC}  Check GitHub status"
-    echo -e "    ${CYAN}e${NC}  Edit config         ${CYAN}q${NC}  Quit"
+    echo -e "    ${CYAN}r${NC}  Restart all         ${CYAN}c${NC}  Check GitHub status"
+    echo -e "    ${CYAN}t${NC}  Projects & scaling  ${CYAN}e${NC}  Edit config"
+    echo -e "    ${CYAN}q${NC}  Quit"
+    if [[ -n "$M_MSG" ]]; then
+        echo ""
+        echo -e "  $M_MSG"
+    fi
     echo ""
     echo -e "  ${DIM}Auto-refreshes every ${REFRESH_INTERVAL}s${NC}"
 }
@@ -1715,47 +1809,15 @@ next_free_id() {
     echo "$next_id"
 }
 
-add_runner() {
-    choose_target "Add a runner to which project?" || return 0
-
-    if [[ "$(get_runner_count)" -ge "$MAX_RUNNERS" ]]; then
-        echo -e "\n  ${YELLOW}Already at MAX_RUNNERS ($MAX_RUNNERS)${NC}"
-        sleep 2
-        return 1
-    fi
-
-    local next_id
-    next_id=$(next_free_id)
-
-    echo -e "\n  ${BLUE}Setting up runner-$next_id for $(target_label "$CHOSEN_TARGET")...${NC}"
-    if ! setup_runner "$next_id" "$CHOSEN_TARGET"; then
-        echo -e "  ${RED}Failed to setup runner-$next_id${NC}"
-        sleep 2
-        return 1
-    fi
-
-    echo -e "  ${BLUE}Starting runner-$next_id...${NC}"
-    clear_failure_state "$next_id"
-    if ! start_runner "$next_id"; then
-        echo -e "  ${RED}Failed to start runner-$next_id${NC}"
-        sleep 2
-        return 1
-    fi
-
-    echo -e "  ${GREEN}Done!${NC}"
-    sleep 1
-}
 remove_runner_prompt() {
     local ids
     ids=$(get_runner_ids)
     [[ -z "$ids" ]] && { echo -e "\n  ${YELLOW}No runners${NC}"; sleep 1; return 0; }
 
-    printf '\n  Remove which runner? [%s]: ' "$(echo "$ids" | tr '\n' ' ')"
-    read -r id
-
-    [[ -z "$id" ]] && return 0
-    [[ ! "$id" =~ ^[0-9]+$ ]] && { echo -e "  ${YELLOW}Invalid ID${NC}"; sleep 1; return 0; }
-    [[ ! -d "$RUNNER_BASE_DIR/runner-$id" ]] && { echo -e "  ${YELLOW}Not found${NC}"; sleep 1; return 0; }
+    build_runner_pick_list
+    pick_item "Remove which runner?" "remove" || return 0
+    local id="${PICK_IDS[$PICK_INDEX]}"
+    [[ -d "$RUNNER_BASE_DIR/runner-$id" ]] || { echo -e "  ${YELLOW}Not found${NC}"; sleep 1; return 0; }
 
     if is_busy "$id"; then
         printf '  %b' "${YELLOW}runner-$id is running a job - remove anyway? [y/N]: ${NC}"
@@ -1813,11 +1875,9 @@ view_logs() {
     ids=$(get_runner_ids)
     [[ -z "$ids" ]] && { echo -e "\n  ${YELLOW}No runners${NC}"; sleep 1; return 0; }
 
-    printf '\n  View logs for which runner? [%s]: ' "$(echo "$ids" | tr '\n' ' ')"
-    read -r id
-
-    [[ -z "$id" ]] && return 0
-    [[ ! "$id" =~ ^[0-9]+$ ]] && { echo -e "  ${YELLOW}Invalid ID${NC}"; sleep 1; return 0; }
+    build_runner_pick_list
+    pick_item "View logs for which runner?" "view" || return 0
+    local id="${PICK_IDS[$PICK_INDEX]}"
 
     local log_file="$LOG_DIR/runner-$id.log"
     [[ ! -f "$log_file" ]] && { echo -e "  ${YELLOW}No log file${NC}"; sleep 1; return 0; }
@@ -1922,6 +1982,26 @@ quit_prompt() {
     fi
     clear
     exit 0
+}
+
+# Apply pending counts from the dashboard, then hand the screen back
+dashboard_apply() {
+    local i changed=0
+    for ((i = 0; i < ${#M_URLS[@]}; i++)); do
+        [[ ${M_WANT[i]} -ne ${M_CUR[i]} ]] && changed=1
+    done
+    [[ $changed -eq 0 ]] && { M_MSG="${DIM}Nothing to apply${NC}"; return 0; }
+    apply_target_counts || true
+    tput cnorm 2>/dev/null || true
+    clear
+    return 0
+}
+
+dashboard_discard() {
+    M_URLS=(); M_WANT=()
+    menu_reload
+    M_MSG="${DIM}Pending changes discarded${NC}"
+    return 0
 }
 
 # ============================================================================
@@ -2054,6 +2134,7 @@ fi
 clear
 tput cnorm 2>/dev/null || true
 tick=0
+M_SEL=0; M_MSG=""; M_URLS=(); M_WANT=()
 while true; do
     supervise_runners || true
     if [[ "$GH_HEALTH_TICKS" -gt 0 ]]; then
@@ -2063,18 +2144,26 @@ while true; do
             check_github_health || true
         fi
     fi
+    menu_reload
     draw_ui || true
     printf '  > '
-    key=""
-    read -rsn1 -t "$REFRESH_INTERVAL" key || true
+    key=$(read_key "$REFRESH_INTERVAL")
+    [[ "$key" != "tick" ]] && M_MSG=""
 
     case "$key" in
-        +|=) add_runner || true ;;
-        -|_) remove_runner_prompt || true ;;
+        tick) ;;
+        up|k|K)   [[ $M_SEL -gt 0 ]] && M_SEL=$((M_SEL - 1)) ;;
+        down|j|J) [[ $M_SEL -lt $((${#M_URLS[@]} - 1)) ]] && M_SEL=$((M_SEL + 1)) ;;
+        right|+|=) menu_adjust 1 ;;
+        left|-|_)  menu_adjust -1 ;;
+        [0-9])     menu_set "$key" ;;
+        enter)     dashboard_apply ;;
+        esc)       dashboard_discard ;;
+        d|D) remove_runner_prompt || true ;;
         s|S) start_all || true ;;
         x|X) stop_all || true ;;
         r|R) restart_all || true ;;
-        t|T|n|N) target_menu tui || true ;;
+        t|T|n|N) target_menu tui || true; M_URLS=(); M_WANT=() ;;
         l|L) view_logs || true ;;
         c|C) check_github_status || true ;;
         e|E) edit_config || true ;;

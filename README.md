@@ -15,7 +15,7 @@ A TUI for managing multiple GitHub Actions self-hosted runners on a single machi
     ● runner-1 PID 12345 [running: build-and-test]
     ● runner-2 PID 12346 [idle]
   myorg/other-repo
-    ● runner-3 PID 12347 [idle (done)]
+    ● runner-3 PID 12347 [idle (last: Succeeded)]
     ○ runner-4 stopped
   myorg (organization)  (no runners)
 ```
@@ -79,8 +79,10 @@ Not supported: Windows (the Windows runner uses a different install flow), Alpin
 
 | Key | Action |
 |-----|--------|
-| `+` | Add a new runner |
-| `-` | Remove a runner |
+| `↑`/`↓` | Select a project |
+| `←`/`→` (or `+`/`-`, `0-9`) | Change the selected project's runner count |
+| `Enter` | Apply pending runner-count changes (`Esc` discards them) |
+| `d` | Remove a specific runner (arrow-key picker) |
 | `s` | Start all runners |
 | `x` | Stop all runners |
 | `r` | Restart all runners |
