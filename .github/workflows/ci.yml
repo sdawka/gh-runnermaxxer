@@ -4,6 +4,22 @@ on:
   pull_request:
 
 jobs:
+  bash:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest] # macOS gives bash 3.2 coverage
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck runnermaxxer.sh
+        run: |
+          # --severity=error only: the script carries pre-existing SC2015/
+          # SC2086/SC2178/SC2128/style-level findings that are tracked but
+          # out of scope here; this still catches genuine shell errors.
+          shellcheck --severity=error runnermaxxer.sh tests/*.sh
+      - name: tests/run.sh
+        run: ./tests/run.sh
+
   go:
     runs-on: ${{ matrix.os }}
     strategy:
@@ -17,4 +33,36 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: tui/go.mod
+      - run: gofmt -l . | tee /tmp/gofmt.out && test ! -s /tmp/gofmt.out
+      - run: go vet ./...
       - run: go build ./...
+      - run: go test ./...
+      - run: go test -tags integration ./...
+
+  release-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tui
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tui/go.mod
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: latest
+          args: check
+          workdir: tui
+      - name: VERSION matches tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          script_version="$(grep -m1 '^VERSION=' ../runnermaxxer.sh | cut -d'"' -f2)"
+          if [[ "$tag" != "$script_version" ]]; then
+            echo "::error::tag v$tag does not match runnermaxxer.sh VERSION=$script_version" >&2
+            exit 1
+          fi

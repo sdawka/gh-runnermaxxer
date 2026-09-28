@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/sdawka/gh-runner-swarm/tui/internal/cli"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/cli"
 )
 
 type fakeCLI struct {

@@ -40,6 +40,18 @@ func (m Model) renderString() string {
 	if m.Log != nil && !m.ShowLog {
 		return m.renderLogFullScreen()
 	}
+	if m.Screen == ScreenAddTarget && m.AddTarget != nil {
+		return m.AddTarget.view()
+	}
+	if m.Screen == ScreenBounds && m.Bounds != nil {
+		return m.Bounds.view()
+	}
+	if m.Screen == ScreenConfig && m.Config != nil {
+		return m.Config.view(m.Snap.Config)
+	}
+	if m.Screen == ScreenGHStatus && m.GHStatusText != nil {
+		return "GitHub status\n\n" + *m.GHStatusText + "\n\n" + m.Theme.Dim.Render("any key closes")
+	}
 
 	var b strings.Builder
 
@@ -49,6 +61,11 @@ func (m Model) renderString() string {
 	}
 	for _, line := range m.renderBanners() {
 		b.WriteString(line)
+		b.WriteString("\n")
+	}
+
+	if m.Screen == ScreenProjects {
+		b.WriteString(m.Theme.Dim.Render("-- Projects --"))
 		b.WriteString("\n")
 	}
 
@@ -118,6 +135,9 @@ func (m Model) renderFooter() string {
 	}
 	if m.Height > 0 && m.Height < 12 {
 		return ""
+	}
+	if m.Screen == ScreenProjects {
+		return m.Theme.Dim.Render("↑↓ move  ←→/hl count  Enter apply & back  a add  x remove  b bounds  q/Esc back  ? help")
 	}
 	return m.Theme.Dim.Render("↑↓ move  ←→ count  Enter apply  Esc discard  d drain  x stop  s start  r restart  t projects  ? help")
 }

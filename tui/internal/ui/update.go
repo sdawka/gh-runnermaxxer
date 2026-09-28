@@ -88,6 +88,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case daemonStartedMsg:
+		delete(m.Inflight, globalKey)
+		if msg.err != nil {
+			m.notice("starting the daemon: "+msg.err.Error(), LevelError)
+			return m, nil
+		}
+		m.notice("daemon starting...", LevelInfo)
+		return m, pollCLI(m.ctx, m.Client)
+
+	case ghStatusMsg:
+		text := msg.text
+		if msg.err != nil {
+			text = msg.err.Error()
+		}
+		m.GHStatusText = &text
+		m.Screen = ScreenGHStatus
+		return m, nil
+
 	case tea.KeyPressMsg:
 		if m.Confirm != nil {
 			return m.handleConfirmKey(msg)
@@ -96,6 +114,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if handled, updated, cmd := m.handleLogKey(msg); handled {
 				return updated, cmd
 			}
+		}
+		switch m.Screen {
+		case ScreenAddTarget:
+			return m.handleAddTargetKey(msg)
+		case ScreenBounds:
+			return m.handleBoundsKey(msg)
+		case ScreenConfig:
+			return m.handleConfigKey(msg)
+		case ScreenGHStatus:
+			// §3.4: "q/Esc/any key closes" the gh-status modal.
+			return m.closeGHStatus()
 		}
 		return m.handleKey(msg)
 	}
@@ -184,13 +213,52 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.confirmAllVariant("stop", func(mm Model) (Model, tea.Cmd) { return mm.execStopAll() })
 
 	case ActionStartAll:
+		// §4.1: while no daemon is running, the shift-S "start all" muscle
+		// memory instead starts the daemon itself - there is nothing to
+		// "start all" of without one supervising the fleet.
+		if !m.DaemonUp {
+			return m.execStartDaemon()
+		}
 		return m.execStartAll()
 
 	case ActionRestartAll:
 		return m.confirmAllVariant("restart", func(mm Model) (Model, tea.Cmd) { return mm.execRestartAll() })
 
 	case ActionApply:
-		return m.applyPending()
+		mm, cmd := m.applyPending()
+		if m.Screen == ScreenProjects {
+			mm.Screen = ScreenDashboard
+		}
+		return mm, cmd
+
+	case ActionProjects:
+		m.Screen = ScreenProjects
+		return m, nil
+
+	case ActionAddTarget:
+		return m.openAddTargetForm()
+
+	case ActionBounds:
+		return m.openBoundsForm()
+
+	case ActionRemoveFromList:
+		return m.removeFromList()
+
+	case ActionConfig:
+		return m.openConfigScreen()
+
+	case ActionCheckGH:
+		return m.openGHStatus()
+
+	case ActionDownload:
+		return m.execDownload()
+
+	case ActionInstallService:
+		if m.DaemonUp {
+			m.notice("a daemon is already running", LevelInfo)
+			return m, nil
+		}
+		return m.confirmInstallService()
 
 	case ActionHelp:
 		m.Help = !m.Help
@@ -221,6 +289,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ActionDiscardOrBack:
+		// Projects screen: 'q'/Esc discard silently and return to the
+		// dashboard (§3.4: "bash discards silently on q ... keep that").
+		// Dashboard: Esc discards with a toast; there's nowhere to "back" to.
+		if m.Screen == ScreenProjects {
+			m.Pending.Clear()
+			m.Screen = ScreenDashboard
+			return m, nil
+		}
 		if !m.Pending.Empty() {
 			m.Pending.Clear()
 			m.notice("Pending changes discarded", LevelWarn)
@@ -250,9 +326,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openDaemonLog()
 	}
 
-	// ActionProjects, ActionAddTarget, ActionCheckGH, ActionConfig,
-	// ActionDownload, ActionBounds and ActionRemoveFromList are handled once
-	// the screens/exec wiring that give them meaning land (commit 11).
 	return m, nil
 }
 

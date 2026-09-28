@@ -6,9 +6,16 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+
+	tea "charm.land/bubbletea/v2"
+
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/cli"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/state"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/ui"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".
@@ -44,14 +51,55 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 0
 	}
 
-	// Startup wiring (script location, snapshot loading, tea.Program) lands
-	// in later commits as internal/cli and internal/ui grow. For now the
-	// scaffold only proves the module builds and --version works.
-	_ = script
-	_ = runnerDir
-	_ = noUnicode
-	_ = debugLog
+	if debugLog != "" {
+		f, err := tea.LogToFile(debugLog, "runnermaxxer-tui")
+		if err != nil {
+			fmt.Fprintf(stderr, "runnermaxxer-tui: --debug %s: %v\n", debugLog, err)
+			return 1
+		}
+		defer f.Close()
+	}
 
-	fmt.Fprintln(stderr, "runnermaxxer-tui: not yet implemented beyond --version")
-	return 1
+	scriptPath, err := cli.Locate(script)
+	if err != nil {
+		fmt.Fprintf(stderr, "runnermaxxer-tui: %v\n", err)
+		return 1
+	}
+
+	if runnerDir != "" {
+		// NewPaths reads RUNNER_BASE_DIR from the environment (mirroring
+		// the script's own precedence); --runner-dir is the TUI-only
+		// equivalent for callers that would rather not export a var.
+		os.Setenv("RUNNER_BASE_DIR", runnerDir)
+	}
+	paths := cli.NewPaths(scriptPath)
+
+	client := cli.NewClient(cli.NewExec(scriptPath))
+
+	// Only watch state.json when it already exists: a fresh install with no
+	// daemon ever having run has nothing to watch yet, and Model.Init falls
+	// back to polling --status --json in that case (§4.1). Once a daemon
+	// starts (including one the TUI itself launches via 'S'), the next
+	// pollCLI-driven reload happens to work fine without a watcher too,
+	// since nothing here depends on watcher-vs-poll after startup beyond
+	// which one delivers snapshotMsg.
+	var watcher *state.Watcher
+	if _, statErr := os.Stat(paths.StateFile); statErr == nil {
+		watcher = state.NewWatcher(paths.StateFile)
+		defer watcher.Close()
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m := ui.New(ctx, client, paths, watcher)
+	m.Glyphs = ui.NewGlyphs(noUnicode)
+	m.Daemon = cli.Daemon{ScriptPath: scriptPath}
+
+	p := tea.NewProgram(m, tea.WithContext(ctx))
+	if _, err := p.Run(); err != nil {
+		fmt.Fprintf(stderr, "runnermaxxer-tui: %v\n", err)
+		return 1
+	}
+	return 0
 }

@@ -55,6 +55,14 @@ One instance manages runners for any number of repositories and organizations. A
 - **Scripting CLI** - `--status [--json]`, `--scale owner/repo=N`, `--drain/--stop/--start/--remove ID`, with meaningful exit codes
 - **Uses `gh` CLI** for authentication - no PAT management needed
 
+## Install
+
+The bash engine (`runnermaxxer.sh`) works alone; the Go TUI (`runnermaxxer-tui`) is an optional client for it that never replaces it - see [TUI](#tui) below.
+
+- **Homebrew** (macOS/Linux): `brew install sdawka/tap/runnermaxxer` installs both `runnermaxxer-tui` and a copy of `runnermaxxer.sh` (see the caveats it prints for where the script lands).
+- **Download a release archive**: grab `runnermaxxer_<version>_<os>_<arch>.tar.gz` from the [releases page](https://github.com/sdawka/gh-runnermaxxer/releases) - each archive bundles the bash script, `runnermaxxer-tui`, `README.md`, and `.runnermaxxer.conf.sample`.
+- **Clone and run the script alone** (no Go toolchain needed, TUI optional): see [Quick Start](#quick-start).
+
 ## Requirements
 
 - bash >= 3.2 (stock macOS bash works)
@@ -82,6 +90,8 @@ Not supported: Windows (the Windows runner uses a different install flow), Alpin
 
 ## Usage
 
+This is the classic bash UI, built into `runnermaxxer.sh` itself and always available. See [TUI](#tui) for the newer Go client and its own (very similar) key table.
+
 | Key | Action |
 |-----|--------|
 | `↑`/`↓` | Select a project |
@@ -96,6 +106,44 @@ Not supported: Windows (the Windows runner uses a different install flow), Alpin
 | `c` | Check GitHub runner status (also triggers a fresh busy/online poll) |
 | `e` | Edit configuration |
 | `q` | Quit |
+
+## TUI
+
+`runnermaxxer-tui` is an optional Go + Bubble Tea client for `runnermaxxer.sh`. It never manages runner state itself: it only reads the daemon's `state.json` snapshot (or falls back to `runnermaxxer.sh --status --json`, polled every 5s, when no daemon is running) and drives every mutation through the same scripting CLI verbs documented in [Scripting / CLI](#scripting--cli) below. **It never stops runners on its own - close it freely, the same as the bash TUI.**
+
+```bash
+cd tui && go build -o bin/runnermaxxer-tui ./cmd/runnermaxxer-tui   # or: make -C tui build
+./tui/bin/runnermaxxer-tui --script ../runnermaxxer.sh
+```
+
+It finds `runnermaxxer.sh` via, in order: `--script PATH`, the `RUNNERMAXXER_SCRIPT` env var, a sibling of the `runnermaxxer-tui` binary, or `PATH`. Other flags: `--runner-dir DIR` (equivalent to exporting `RUNNER_BASE_DIR`), `--no-unicode` (ASCII glyphs for terminals without box-drawing/Unicode support), `--debug FILE` (Bubble Tea debug log), `--version`.
+
+Dashboard keys (arrows and vi-style `hjkl` both work; shifted letters act on every runner instead of the one under the cursor):
+
+| Key | Action |
+|-----|--------|
+| `↑`/`k`, `↓`/`j` | Move cursor |
+| `←`, `→`, `+`/`=`, `-`/`_`, `0`-`9` | Change the selected project's pending runner count |
+| `Enter` | Apply pending changes (`Esc` discards them) |
+| `d` | Drain (remove) the runner under the cursor; on a project header row, opens a picker |
+| `D` | Remove the runner under the cursor now (no drain), always confirms |
+| `x`/`X` | Stop the runner under the cursor / stop all |
+| `s` | Start the runner under the cursor |
+| `S` | Start all runners - or, when no daemon is running yet, start the daemon instead |
+| `r`/`R` | Restart the runner under the cursor / restart all |
+| `t` (or `n`) | Projects & scaling screen |
+| `a` | Add a repo or org (shortcut into the add-target form) |
+| `l` | Runner logs (full-screen viewer) |
+| `L` | Daemon event log |
+| `c` | Check GitHub runner status (`--gh-status`); closing also triggers a fresh poll |
+| `e` | Edit configuration |
+| `g` | Download the latest runner tarball, when the stale-tarball banner is showing |
+| `I` | Install the daemon as a login service, when no daemon is running |
+| `/` | Filter rows |
+| `?` | Help overlay |
+| `q`, `ctrl+c` | Quit (never touches runners; confirms only if there are unapplied pending edits) |
+
+Projects screen (`t`): same keys, but `h`/`l` change the selected project's pending count instead of moving between logs (there is no logs key here), `a` opens the add-target form, `x` removes the project from `.runnermaxxer.targets` (only when it has no runners; otherwise a toast explains why, matching the bash menu), `b` opens the autoscale-bounds form, and `Enter`/`s` applies and returns to the dashboard. **`q`/`Esc` discards pending changes silently and goes back** - matching the bash project menu's own behavior, not the dashboard's confirm-before-discarding one.
 
 ## Auto-Detected Labels
 
@@ -169,6 +217,8 @@ Scripting (no UI; exit status 0 = ok, 1 = failed, 2 = bad usage):
 `--daemon` runs the same supervisor as the TUI (restarts, backoff, quarantine, GitHub health checks, drains) with no terminal UI. It needs a valid `.runnermaxxer.conf` (run `--setup` first; there is no onboarding in headless mode) and never shows the project menu - set runner counts with `--scale` or the TUI beforehand. Each notable event (runner started, restarted, quarantined, recycled, draining, removed, daemon start/stop) is appended as one timestamped line to `runners/.logs/runnermaxxer.log`.
 
 On SIGTERM/SIGINT the daemon exits cleanly and **leaves runners running**; the next daemon or TUI re-adopts them. `--stop-daemon` sends SIGTERM and waits up to 10s.
+
+While a daemon runs, it also maintains `<RUNNER_BASE_DIR>/.pids/state.json` (`runners/.pids/state.json` by default): a machine-readable snapshot (schema versioned, currently `2`) of every project and runner, refreshed once per tick. This is the same file `runnermaxxer-tui` watches for live updates, but it's a stable read interface for any tool: `jq . < runners/.pids/state.json` works without shelling out to `--status --json` at all, as long as a daemon is running to keep it fresh.
 
 To start it automatically at login and restart it if it dies:
 
@@ -338,7 +388,7 @@ gh-runnermaxxer/
 └── runners/                     # Runner instances (auto-created)
     ├── runner-1/
     ├── runner-2/
-    ├── .pids/
+    ├── .pids/                   # runner-N.pid, .daemon.pid, state.json (see TUI)
     ├── .logs/                   # runner-N.log, runnermaxxer.log (daemon events), daemon.out
     ├── .daemon.pid              # PID of a running --daemon
     └── .toolcache/              # Shared tool cache (SHARED_TOOL_CACHE=1)
@@ -382,6 +432,14 @@ If unregistering from GitHub fails (e.g. network down during removal), the runne
 ```
 
 A tiny plain-bash test harness (no dependencies, bats not required) that sources `runnermaxxer.sh` as a library against a temporary runner directory and exercises its pure/near-pure functions (URL/target parsing, the project menu, log-status parsing, key decoding, etc.) without ever touching real runners or calling `gh`.
+
+The Go TUI has its own test suite:
+
+```bash
+cd tui
+go test ./...                    # unit + golden tests, no external processes
+go test -tags integration ./...  # also runs the real runnermaxxer.sh with gh stubbed out
+```
 
 ## License
 

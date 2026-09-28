@@ -3,7 +3,7 @@ package ui
 import (
 	"testing"
 
-	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/state"
 )
 
 func snapWithTargets(maxRunners int, targets ...state.Target) state.Snapshot {

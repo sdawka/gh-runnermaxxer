@@ -9,6 +9,7 @@ import (
 // (runnermaxxer.sh:20,25,40,41,44), so the TUI can find state.json and the
 // per-runner logs without asking the script.
 type Paths struct {
+	ScriptPath string // the located runnermaxxer.sh itself, for cli.Daemon
 	ScriptDir  string // dir containing runnermaxxer.sh
 	RunnerBase string // $RUNNER_BASE_DIR or ScriptDir/runners
 	PIDDir     string // RunnerBase/.pids
@@ -29,6 +30,7 @@ func NewPaths(scriptPath string) Paths {
 	pidDir := filepath.Join(runnerBase, ".pids")
 	logDir := filepath.Join(runnerBase, ".logs")
 	return Paths{
+		ScriptPath: scriptPath,
 		ScriptDir:  scriptDir,
 		RunnerBase: runnerBase,
 		PIDDir:     pidDir,

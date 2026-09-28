@@ -1,6 +1,6 @@
 package ui
 
-import "github.com/sdawka/gh-runner-swarm/tui/internal/state"
+import "github.com/sdawka/gh-runnermaxxer/tui/internal/state"
 
 // RowKind identifies what a dashboard row shows.
 type RowKind int

@@ -8,8 +8,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/sdawka/gh-runner-swarm/tui/internal/cli"
-	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/cli"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/state"
 )
 
 // fakeRunner records every exec's argv, in call order, and returns a canned
@@ -50,6 +50,7 @@ func argsKey(args []string) string {
 func newActionsTestModel(f *fakeRunner, snap state.Snapshot) Model {
 	m := New(context.Background(), cli.NewClient(f), cli.Paths{}, nil)
 	m.Snap = snap
+	m.DaemonUp = snap.DaemonPID != 0
 	m.Cursor = 0
 	return m
 }
@@ -248,12 +249,12 @@ func TestStopAllSkipsConfirmWhenNoneBusy(t *testing.T) {
 	}
 	runCmdSync(cmd)
 	calls := f.callArgs()
-	if len(calls) != 2 {
-		t.Fatalf("calls = %v, want one --stop per runner", calls)
+	if len(calls) != 1 || calls[0][0] != "--stop-all" {
+		t.Fatalf("calls = %v, want a single --stop-all exec", calls)
 	}
 }
 
-func TestStopAllConfirmsAndDrainsBusyStopsIdle(t *testing.T) {
+func TestStopAllConfirmsThenRunsStopAll(t *testing.T) {
 	f := &fakeRunner{}
 	snap := state.Snapshot{Runners: []state.Runner{busyRunner(1), idleRunner(2)}}
 	m := newActionsTestModel(f, snap)
@@ -262,19 +263,16 @@ func TestStopAllConfirmsAndDrainsBusyStopsIdle(t *testing.T) {
 	if m.Confirm == nil {
 		t.Fatal("confirmAllVariant did not open a modal with a busy runner present")
 	}
+	if len(f.callArgs()) != 0 {
+		t.Fatal("exec ran before the modal was confirmed")
+	}
 
 	_, cmd := m.handleConfirmKey(tea.KeyPressMsg{Text: "y"})
 	runCmdSync(cmd)
 
 	calls := f.callArgs()
-	if len(calls) != 2 {
-		t.Fatalf("calls = %v, want 2 execs", calls)
-	}
-	if calls[0][0] != "--drain" || calls[0][1] != "1" {
-		t.Errorf("first call = %v, want --drain of the busy runner", calls[0])
-	}
-	if calls[1][0] != "--stop" || calls[1][1] != "2" {
-		t.Errorf("second call = %v, want --stop of the idle runner", calls[1])
+	if len(calls) != 1 || calls[0][0] != "--stop-all" {
+		t.Fatalf("calls = %v, want a single --stop-all exec after confirming", calls)
 	}
 }
 
@@ -311,6 +309,53 @@ func TestExecRestartSkipsStartWhenStopFails(t *testing.T) {
 	calls := f.callArgs()
 	if len(calls) != 1 {
 		t.Fatalf("calls = %v, want only --stop (start skipped after a failed stop)", calls)
+	}
+}
+
+func TestExecRestartAllRunsStopAllThenStartAll(t *testing.T) {
+	f := &fakeRunner{}
+	m := newActionsTestModel(f, state.Snapshot{})
+
+	_, cmd := m.execRestartAll()
+	runCmdSync(cmd)
+
+	calls := f.callArgs()
+	if len(calls) != 2 || calls[0][0] != "--stop-all" || calls[1][0] != "--start-all" {
+		t.Fatalf("calls = %v, want --stop-all then --start-all", calls)
+	}
+}
+
+func TestExecRestartAllSkipsStartAllWhenStopAllFails(t *testing.T) {
+	f := &fakeRunner{override: map[string]cli.Result{
+		"--stop-all ": {ExitCode: 1, Stderr: "boom"},
+	}}
+	m := newActionsTestModel(f, state.Snapshot{})
+
+	_, cmd := m.execRestartAll()
+	msg := runCmdSync(cmd)
+	res, ok := msg.(cmdResultMsg)
+	if !ok {
+		t.Fatalf("msg = %T, want cmdResultMsg", msg)
+	}
+	if res.res.ExitCode != 1 {
+		t.Errorf("ExitCode = %d, want 1 (the failed stop-all's result)", res.res.ExitCode)
+	}
+	calls := f.callArgs()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %v, want only --stop-all (start-all skipped after a failure)", calls)
+	}
+}
+
+func TestExecStartAllRunsStartAll(t *testing.T) {
+	f := &fakeRunner{}
+	m := newActionsTestModel(f, state.Snapshot{})
+
+	_, cmd := m.execStartAll()
+	runCmdSync(cmd)
+
+	calls := f.callArgs()
+	if len(calls) != 1 || calls[0][0] != "--start-all" {
+		t.Fatalf("calls = %v, want a single --start-all exec", calls)
 	}
 }
 

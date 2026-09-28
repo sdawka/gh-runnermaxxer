@@ -8,9 +8,9 @@ import (
 	"charm.land/bubbles/v2/spinner"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/sdawka/gh-runner-swarm/tui/internal/cli"
-	"github.com/sdawka/gh-runner-swarm/tui/internal/logtail"
-	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/cli"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/logtail"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/state"
 )
 
 // noLogOpen and daemonLogID are the two Model.Log sentinel ids; any other
@@ -20,14 +20,17 @@ const (
 	daemonLogID = -2
 )
 
-// Screen identifies which top-level view is active. Only ScreenDashboard
-// exists so far; the others are added as their commits land (Go plan §8,
-// commits 11-13).
+// Screen identifies which top-level view is active. The full-screen log
+// viewer is handled separately via Model.Log rather than as a Screen.
 type Screen int
 
 const (
 	ScreenDashboard Screen = iota
 	ScreenProjects
+	ScreenAddTarget
+	ScreenBounds
+	ScreenConfig
+	ScreenGHStatus
 )
 
 // Level is a Notice's severity, used to pick its style.
@@ -88,6 +91,23 @@ type Model struct {
 	Screen  Screen
 	Help    bool
 	Confirm *ConfirmModel
+
+	// formReturn is the screen to restore once the currently open form
+	// (AddTarget or Bounds) closes, since 'a' opens the same form from
+	// either the dashboard or the projects screen (§3.4).
+	formReturn Screen
+	AddTarget  *AddTargetForm
+	Bounds     *BoundsForm
+	Config     *ConfigModel
+
+	// GHStatusText holds --gh-status's output while ScreenGHStatus is open;
+	// nil means the modal isn't open.
+	GHStatusText *string
+
+	// Daemon starts runnermaxxer.sh --daemon detached, for the 'S' banner
+	// action when no daemon is running (§4.1). nil in tests that don't
+	// exercise it.
+	Daemon DaemonStarter
 
 	Width, Height int
 	ShowLog       bool // wide enough for a permanent side log pane, if one is open

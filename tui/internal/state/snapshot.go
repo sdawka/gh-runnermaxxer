@@ -8,12 +8,38 @@
 // schema directly.
 package state
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // SupportedSchema is the highest state.json "schema" value this client
 // understands. A snapshot with a higher schema number is rejected rather
 // than partially trusted.
 const SupportedSchema = 2
+
+// intOrZero and int64OrZero back the UnmarshalJSON overrides below: the bash
+// writer's json_num() helper (runnermaxxer.sh:4026) emits a literal JSON
+// null for any field sourced from an empty shell variable - a daemon that
+// has never run (daemon_pid), a gh probe that hasn't happened yet
+// (gh.checked/rate_remaining/rate_reset/polled_at), or a target with no
+// autoscale bounds set (min/max) - none of which json.Unmarshal will decode
+// into a plain int/int64 field. Each affected type below gets a custom
+// UnmarshalJSON that decodes those fields as pointers first and folds a nil
+// (null) into the JSON-schema's own implied zero value.
+func intOrZero(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func int64OrZero(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
 
 // Source records where a Snapshot came from.
 type Source int
@@ -76,6 +102,20 @@ type Snapshot struct {
 	Source   Source    `json:"-"`
 }
 
+// UnmarshalJSON tolerates daemon_pid:null (no daemon has ever run yet).
+func (s *Snapshot) UnmarshalJSON(data []byte) error {
+	type alias Snapshot
+	aux := &struct {
+		DaemonPID *int `json:"daemon_pid"`
+		*alias
+	}{alias: (*alias)(s)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	s.DaemonPID = intOrZero(aux.DaemonPID)
+	return nil
+}
+
 // GH is the gh{} object: auth identity, scopes and API health.
 type GH struct {
 	User          string   `json:"user"`
@@ -87,6 +127,27 @@ type GH struct {
 	RateRemaining int      `json:"rate_remaining"`
 	RateReset     int64    `json:"rate_reset"`
 	PolledAt      int64    `json:"polled_at"`
+}
+
+// UnmarshalJSON tolerates checked/rate_remaining/rate_reset/polled_at:null
+// (no gh probe has run yet).
+func (g *GH) UnmarshalJSON(data []byte) error {
+	type alias GH
+	aux := &struct {
+		Checked       *int64 `json:"checked"`
+		RateRemaining *int   `json:"rate_remaining"`
+		RateReset     *int64 `json:"rate_reset"`
+		PolledAt      *int64 `json:"polled_at"`
+		*alias
+	}{alias: (*alias)(g)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	g.Checked = int64OrZero(aux.Checked)
+	g.RateRemaining = intOrZero(aux.RateRemaining)
+	g.RateReset = int64OrZero(aux.RateReset)
+	g.PolledAt = int64OrZero(aux.PolledAt)
+	return nil
 }
 
 // Tarball is the tarball{} object: on-disk runner tarball freshness.
@@ -119,12 +180,69 @@ type Config struct {
 	AutoscaleIdleMinutes int    `json:"AUTOSCALE_IDLE_MINUTES"`
 }
 
+// looseBool decodes either a real JSON boolean or the numeric 0/1 that
+// runnermaxxer.sh's state_json actually emits for the config{} object: its
+// CONFIG_KEYS loop (runnermaxxer.sh:4167-4177) runs every key except
+// RUNNER_NAME_PREFIX through json_num(), including the three that are
+// logically booleans (SHARED_TOOL_CACHE, EPHEMERAL_RUNNERS, AUTOSCALE), so
+// the wire value is "0"/"1" rather than "false"/"true".
+type looseBool bool
+
+func (b *looseBool) UnmarshalJSON(data []byte) error {
+	switch string(data) {
+	case "true", "1":
+		*b = true
+	case "false", "0", "null":
+		*b = false
+	default:
+		var v bool
+		if err := json.Unmarshal(data, &v); err != nil {
+			return err
+		}
+		*b = looseBool(v)
+	}
+	return nil
+}
+
+// UnmarshalJSON tolerates SHARED_TOOL_CACHE/EPHEMERAL_RUNNERS/AUTOSCALE
+// coming through as the numbers 0/1 instead of JSON booleans.
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type alias Config
+	aux := &struct {
+		SharedToolCache  looseBool `json:"SHARED_TOOL_CACHE"`
+		EphemeralRunners looseBool `json:"EPHEMERAL_RUNNERS"`
+		Autoscale        looseBool `json:"AUTOSCALE"`
+		*alias
+	}{alias: (*alias)(c)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	c.SharedToolCache = bool(aux.SharedToolCache)
+	c.EphemeralRunners = bool(aux.EphemeralRunners)
+	c.Autoscale = bool(aux.Autoscale)
+	return nil
+}
+
 // TargetError is a target-level error (scope, 404, etc.), set to nil in the
 // JSON ("error": null) when the target is healthy.
 type TargetError struct {
 	Class   string `json:"class"`
 	Message string `json:"message"`
 	Since   int64  `json:"since"`
+}
+
+// UnmarshalJSON tolerates since:null.
+func (e *TargetError) UnmarshalJSON(data []byte) error {
+	type alias TargetError
+	aux := &struct {
+		Since *int64 `json:"since"`
+		*alias
+	}{alias: (*alias)(e)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	e.Since = int64OrZero(aux.Since)
+	return nil
 }
 
 // Target is one entry of targets[]: a repo or org this fleet manages.
@@ -144,6 +262,28 @@ type Target struct {
 	Queued        int          `json:"queued"`
 	Unsatisfiable int          `json:"unsatisfiable"`
 	Error         *TargetError `json:"error"`
+}
+
+// UnmarshalJSON tolerates min/max/queued/unsatisfiable:null (e.g. a target
+// with no autoscale bounds set, or before the daemon's first scheduling
+// pass).
+func (t *Target) UnmarshalJSON(data []byte) error {
+	type alias Target
+	aux := &struct {
+		Min           *int `json:"min"`
+		Max           *int `json:"max"`
+		Queued        *int `json:"queued"`
+		Unsatisfiable *int `json:"unsatisfiable"`
+		*alias
+	}{alias: (*alias)(t)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	t.Min = intOrZero(aux.Min)
+	t.Max = intOrZero(aux.Max)
+	t.Queued = intOrZero(aux.Queued)
+	t.Unsatisfiable = intOrZero(aux.Unsatisfiable)
+	return nil
 }
 
 // Runner is one entry of runners[].
@@ -166,6 +306,32 @@ type Runner struct {
 	LastErr     string      `json:"lasterr"`
 	LogPath     string      `json:"log_path"`
 	WorkMB      int         `json:"work_mb"`
+}
+
+// UnmarshalJSON tolerates pid/job_started/elapsed/fails/next_retry/work_mb
+// being null (empty shell vars through json_num() for a runner that hasn't
+// started a job, isn't currently backing off, etc.).
+func (r *Runner) UnmarshalJSON(data []byte) error {
+	type alias Runner
+	aux := &struct {
+		PID        *int   `json:"pid"`
+		JobStarted *int64 `json:"job_started"`
+		Elapsed    *int   `json:"elapsed"`
+		Fails      *int   `json:"fails"`
+		NextRetry  *int64 `json:"next_retry"`
+		WorkMB     *int   `json:"work_mb"`
+		*alias
+	}{alias: (*alias)(r)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+	r.PID = intOrZero(aux.PID)
+	r.JobStarted = int64OrZero(aux.JobStarted)
+	r.Elapsed = intOrZero(aux.Elapsed)
+	r.Fails = intOrZero(aux.Fails)
+	r.NextRetry = int64OrZero(aux.NextRetry)
+	r.WorkMB = intOrZero(aux.WorkMB)
+	return nil
 }
 
 // Backoff reports whether this runner is in the client-derived "backoff"

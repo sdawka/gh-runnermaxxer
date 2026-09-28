@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/state"
 )
 
 // renderHeader is the status bar (Go design doc §3.1): script version,
@@ -59,7 +59,7 @@ func (m Model) renderFleetSummary() string {
 	tb := m.Snap.Tarball
 	tbLine := fmt.Sprintf("tarball %s", orDefault(tb.Version, "?"))
 	if tb.Stale {
-		tbLine += fmt.Sprintf(" (latest %s) %s", orDefault(tb.Latest, "?"), m.Glyphs.Warn)
+		tbLine += fmt.Sprintf(" (latest %s) %s [g]et latest", orDefault(tb.Latest, "?"), m.Glyphs.Warn)
 	}
 	return fmt.Sprintf("%s · disk %d%% free", tbLine, m.Snap.Disk.PctFree)
 }
@@ -71,7 +71,7 @@ func (m Model) renderBanners() []string {
 	var out []string
 
 	if m.Snap.DaemonPID == 0 {
-		out = append(out, m.Theme.Warn.Render(fmt.Sprintf("%s no daemon running: runners are not supervised (no auto-restart, drains never finish)", m.Glyphs.Warn)))
+		out = append(out, m.Theme.Warn.Render(fmt.Sprintf("%s no daemon running: runners are not supervised (no auto-restart, drains never finish)   [S]tart daemon   [I]nstall service", m.Glyphs.Warn)))
 	} else if stale, age := m.Snap.Stale(m.Now); stale {
 		out = append(out, m.Theme.Warn.Render(fmt.Sprintf("%s daemon %d stalled: last tick %s ago", m.Glyphs.Warn, m.Snap.DaemonPID, age.Round(time.Second))))
 	}

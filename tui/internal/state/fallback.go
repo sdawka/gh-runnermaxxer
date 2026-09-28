@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sdawka/gh-runner-swarm/tui/internal/cli"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/cli"
 )
 
 // CLIRunner is the minimal surface FromCLI needs, satisfied by
