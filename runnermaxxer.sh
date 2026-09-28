@@ -436,12 +436,142 @@ detect_labels() {
 # Configuration
 # ============================================================================
 
-load_config() {
-    if [[ -f "$CONFIG_FILE" ]]; then
-        # shellcheck disable=SC1090
-        source "$CONFIG_FILE"
+# ---- Config file parser ---------------------------------------------------
+# The config file used to be `source`d, so any line in it ran as shell code
+# (C1). It is parsed instead: KEY=VALUE / KEY="VALUE" / KEY='VALUE' lines,
+# optional trailing "# comment", for the keys in CONFIG_KEYS (plus the legacy
+# REPO_URL/ORG_URL, migrated below). Anything else is ignored with a warning.
+CONFIG_LEGACY_KEYS="REPO_URL ORG_URL"
+
+config_known_key() {
+    case " $CONFIG_KEYS $CONFIG_LEGACY_KEYS " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# config_valid_value KEY VALUE - pure. Returns 0 when VALUE is acceptable
+# for KEY; the upper bounds are clamped later by sanitize_settings.
+config_valid_value() {
+    local k=$1 v=$2 re_prefix='^[A-Za-z0-9_-]{1,60}$'
+    # shellcheck disable=SC1003  # a literal backslash, not an escape
+    case "$v" in *'"'*|*"'"*|*'\'*|*'$'*|*'`'*) return 1 ;; esac
+    case "$k" in
+        RUNNER_NAME_PREFIX) [[ -z "$v" || "$v" =~ $re_prefix ]] ;;
+        MAX_RUNNERS|REFRESH_INTERVAL|MAX_RESTART_ATTEMPTS|MAX_LOG_SIZE_MB)
+            [[ "$v" =~ ^[0-9]{1,9}$ ]] && [[ $((10#$v)) -ge 1 ]] ;;
+        GH_HEALTH_TICKS|AUTOSCALE_IDLE_MINUTES) [[ "$v" =~ ^[0-9]{1,9}$ ]] ;;
+        SHARED_TOOL_CACHE|EPHEMERAL_RUNNERS|AUTOSCALE) [[ "$v" =~ ^[01]$ ]] ;;
+        REPO_URL|ORG_URL) [[ -z "$v" ]] || valid_target_url "$(normalize_url "$v")" ;;
+        *) return 1 ;;
+    esac
+}
+
+# The rule for KEY, for error messages
+config_rule() {
+    case "$1" in
+        RUNNER_NAME_PREFIX) echo "letters, digits, _ and -, at most 60 characters (GitHub caps runner names at 64)" ;;
+        MAX_RUNNERS) echo "a whole number, 1-500" ;;
+        REFRESH_INTERVAL) echo "seconds, 1-3600" ;;
+        MAX_RESTART_ATTEMPTS) echo "a whole number, 1-100" ;;
+        MAX_LOG_SIZE_MB) echo "megabytes, 1-10000" ;;
+        GH_HEALTH_TICKS) echo "a whole number of ticks, 0 (off) to 100000" ;;
+        AUTOSCALE_IDLE_MINUTES) echo "minutes, 0-100000" ;;
+        SHARED_TOOL_CACHE|EPHEMERAL_RUNNERS|AUTOSCALE) echo "0 or 1" ;;
+        *) echo "one of: $CONFIG_KEYS" ;;
+    esac
+}
+
+# Strip leading zeros from a number ("07" -> 7); anything else unchanged
+config_norm_num() {
+    if [[ "$1" =~ ^[0-9]{1,9}$ ]]; then echo $((10#$1)); else printf '%s\n' "$1"; fi
+}
+
+# config_set KEY VALUE - whitelist + validation, then assign. Returns 1
+# (printing why to stderr) and leaves the variable alone otherwise.
+config_set() {
+    local k=$1 v=$2
+    case " $CONFIG_KEYS " in
+        *" $k "*) ;;
+        *) echo "unknown setting '$k' (settings: $CONFIG_KEYS)" >&2; return 1 ;;
+    esac
+    [[ "$k" == "RUNNER_NAME_PREFIX" ]] || v=$(config_norm_num "$v")
+    if ! config_valid_value "$k" "$v"; then
+        echo "invalid value for $k: '$v' - $(config_rule "$k")" >&2
+        return 1
     fi
-    [[ -z "$RUNNER_NAME_PREFIX" ]] && RUNNER_NAME_PREFIX=$(default_hostname)
+    eval "$k=\$v"
+    return 0
+}
+
+# Add a note once (sanitize_settings can run more than once per load)
+config_warn() {
+    local w
+    for w in ${CONFIG_WARNINGS[@]+"${CONFIG_WARNINGS[@]}"}; do
+        [[ "$w" == "$1" ]] && return 0
+    done
+    CONFIG_WARNINGS[${#CONFIG_WARNINGS[@]}]="$1"
+}
+
+# parse_config_file FILE - assign every valid KEY=VALUE line; warn about the rest
+parse_config_file() {
+    local f=$1 line k v n=0 name cur
+    local re='^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=("([^"]*)"|'"'"'([^'"'"']*)'"'"'|([^[:space:]#"'"'"']*))[[:space:]]*(#.*)?$'
+    local re_blank='^[[:space:]]*(#.*)?$'
+    [[ -f "$f" ]] || return 0
+    name=$(basename "$f")
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        n=$((n + 1))
+        line=${line%$'\r'}
+        [[ "$line" =~ $re_blank ]] && continue
+        if [[ ! "$line" =~ $re ]]; then
+            k=${line%%=*}; k=${k#"${k%%[![:space:]]*}"}
+            if [[ "$line" == *=* && "$k" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+                config_warn "$name line $n ($k) ignored: not KEY=VALUE (a plain or quoted value, no \$ or commands)"
+            else
+                config_warn "$name line $n ignored: not KEY=VALUE"
+            fi
+            continue
+        fi
+        k=${BASH_REMATCH[1]}
+        v="${BASH_REMATCH[3]}${BASH_REMATCH[4]}${BASH_REMATCH[5]}"
+        if [[ "$k" == "RUNNER_BASE_DIR" ]]; then
+            config_warn "RUNNER_BASE_DIR in $name is ignored - set RUNNER_BASE_DIR in the environment, not the config file"
+            continue
+        fi
+        if ! config_known_key "$k"; then
+            config_warn "ignored unknown key $k in $name"
+            continue
+        fi
+        [[ "$k" == "RUNNER_NAME_PREFIX" ]] || v=$(config_norm_num "$v")
+        if ! config_valid_value "$k" "$v"; then
+            eval "cur=\${$k:-}"
+            config_warn "ignored invalid $k='$v' in $name ($(config_rule "$k")) - using ${cur:-the default}"
+            continue
+        fi
+        eval "$k=\$v"
+    done < "$f"
+    return 0
+}
+
+# mtime of a file (0 when missing), GNU stat first (see rotate_log)
+file_mtime() {
+    local m
+    m=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0)
+    [[ "$m" =~ ^[0-9]+$ ]] || m=0
+    echo "$m"
+}
+
+# "mtime:size" - a same-second rewrite usually changes the size
+file_sig() {
+    local sz
+    sz=$(stat -c %s "$1" 2>/dev/null || stat -f %z "$1" 2>/dev/null || echo 0)
+    echo "$(file_mtime "$1"):$sz"
+}
+
+CONFIG_LOADED_MTIME=""
+load_config() {
+    CONFIG_WARNINGS=()
+    parse_config_file "$CONFIG_FILE"
+    [[ -z "$RUNNER_NAME_PREFIX" ]] && RUNNER_NAME_PREFIX=$(default_hostname | cut -c1-60)
 
     # v2 configs named a single REPO_URL/ORG_URL. Targets now live in the
     # targets file, so move it over once and drop it from the config.
@@ -455,12 +585,38 @@ load_config() {
         REPO_URL=""; ORG_URL=""
         [[ -f "$CONFIG_FILE" ]] && save_config quiet
     fi
+    CONFIG_LOADED_MTIME="$(file_sig "$CONFIG_FILE") $(file_sig "$TARGETS_FILE")"
+    return 0
+}
+
+# Daemon: pick up --set-config / --set-bounds / --add-target made by other
+# processes (the TUI) without a restart. Compares the config and targets
+# files' mtimes with the ones seen at the last load. A changed
+# REFRESH_INTERVAL applies from the next sleep, GH_HEALTH_TICKS from the
+# next poll.
+config_reload_if_changed() {
+    local now_m
+    now_m="$(file_sig "$CONFIG_FILE") $(file_sig "$TARGETS_FILE")"
+    if [[ -z "$CONFIG_LOADED_MTIME" ]]; then
+        CONFIG_LOADED_MTIME=$now_m
+        return 0
+    fi
+    [[ "$now_m" == "$CONFIG_LOADED_MTIME" ]] && return 0
+    load_config >/dev/null 2>&1 || true
+    sanitize_settings
+    CONFIG_LOADED_MTIME=$now_m
+    dlog "configuration reloaded (config or targets file changed)"
     return 0
 }
 
 # Strip trailing slashes and a .git suffix so pasted URLs validate
 normalize_url() {
     local u="$1"
+    # SSH clone URLs (C8): git@github.com:o/r.git, ssh://git@github.com/o/r
+    case "$u" in
+        git@github.com:*)       u="https://github.com/${u#git@github.com:}" ;;
+        ssh://git@github.com/*) u="https://github.com/${u#ssh://git@github.com/}" ;;
+    esac
     u="${u%/}"
     u="${u%.git}"
     u="${u%/}"
@@ -471,7 +627,8 @@ normalize_url() {
 # target lists are word-split in for loops)
 valid_repo_url() { [[ "$1" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; }
 valid_org_url()  { [[ "$1" =~ ^https://github\.com/[A-Za-z0-9_.-]+$ ]]; }
-valid_prefix()   { [[ "$1" =~ ^[a-zA-Z0-9_-]+$ ]]; }
+# At most 60 characters: GitHub caps runner names at 64, and "-NNN" follows
+valid_prefix()   { local re='^[a-zA-Z0-9_-]{1,60}$'; [[ "$1" =~ $re ]]; }
 
 validate_config() {
     local errors=()
@@ -496,7 +653,7 @@ validate_config() {
 
     if [[ -n "$RUNNER_NAME_PREFIX" ]] && ! valid_prefix "$RUNNER_NAME_PREFIX"; then
         errors[${#errors[@]}]="RUNNER_NAME_PREFIX contains invalid characters: $RUNNER_NAME_PREFIX"
-        errors[${#errors[@]}]="Use only letters, numbers, underscores, and hyphens"
+        errors[${#errors[@]}]="Use only letters, numbers, underscores, and hyphens, at most 60 characters"
     fi
 
     if [[ ! "$SHARED_TOOL_CACHE" =~ ^[01]$ ]]; then
@@ -534,26 +691,29 @@ validate_config() {
 }
 
 save_config() {
-    local tmp="$CONFIG_FILE.tmp.$$"
-    cat > "$tmp" << EOF
-# gh-runnermaxxer configuration
-# Projects (repos/orgs) are listed in .runnermaxxer.targets, not here.
-RUNNER_NAME_PREFIX="$RUNNER_NAME_PREFIX"
-MAX_RUNNERS="$MAX_RUNNERS"
-REFRESH_INTERVAL="$REFRESH_INTERVAL"
-MAX_RESTART_ATTEMPTS="$MAX_RESTART_ATTEMPTS"
-MAX_LOG_SIZE_MB="$MAX_LOG_SIZE_MB"
-GH_HEALTH_TICKS="$GH_HEALTH_TICKS"
-SHARED_TOOL_CACHE="$SHARED_TOOL_CACHE"
-EPHEMERAL_RUNNERS="$EPHEMERAL_RUNNERS"
-AUTOSCALE="$AUTOSCALE"
-AUTOSCALE_IDLE_MINUTES="$AUTOSCALE_IDLE_MINUTES"
-EOF
+    local tmp="$CONFIG_FILE.tmp.$$" k v
+    {
+        echo "# gh-runnermaxxer configuration"
+        echo "# Projects (repos/orgs) are listed in .runnermaxxer.targets, not here."
+        for k in $CONFIG_KEYS; do
+            eval "v=\${$k:-}"
+            # Values are validated on the way in; never write one that could
+            # break out of the quotes if something else put it there
+            # shellcheck disable=SC1003  # a literal backslash, not an escape
+            case "$v" in *'"'*|*'\'*|*'$'*|*'`'*) v="" ;; esac
+            printf '%s="%s"\n' "$k" "$v"
+        done
+    } > "$tmp"
     mv "$tmp" "$CONFIG_FILE"
+    CONFIG_LOADED_MTIME="$(file_sig "$CONFIG_FILE") $(file_sig "$TARGETS_FILE")"
     [[ "${1:-}" == "quiet" ]] || echo -e "  ${GREEN}Configuration saved${NC}"
 }
 
 run_onboarding() {
+    if [[ ! -t 0 ]]; then
+        echo "No configuration and no terminal to ask - run --setup interactively, or write .runnermaxxer.conf" >&2
+        exit 2
+    fi
     echo ""
     echo -e "${BOLD}${CYAN}╔═══════════════════════════════════════════════════╗${NC}"
     echo -e "${BOLD}${CYAN}║         gh-runnermaxxer Setup                     ║${NC}"
@@ -575,7 +735,7 @@ run_onboarding() {
     [[ -z "$new_prefix" ]] && new_prefix="$default_prefix"
 
     if ! valid_prefix "$new_prefix"; then
-        echo -e "\n  ${RED}Invalid characters. Use only letters, numbers, underscores, hyphens.${NC}"
+        echo -e "\n  ${RED}Invalid prefix. Use only letters, numbers, underscores, hyphens - at most 60 characters (GitHub caps runner names at 64).${NC}"
         exit 1
     fi
 
@@ -640,6 +800,7 @@ target_entry_to_url() {
     [[ -z "$e" || "$e" == \#* ]] && { echo ""; return 0; }
     case "$e" in
         https://github.com/*) ;;
+        git@github.com:*|ssh://git@github.com/*) ;;   # normalize_url maps these
         http://github.com/*)  e="https://${e#http://}" ;;
         github.com/*)         e="https://$e" ;;
         *)                    e="https://github.com/$e" ;;
@@ -3156,9 +3317,16 @@ view_logs() {
 }
 
 check_github_status() {
-    local t endpoint out any=0
-
     echo -e "\n  ${BLUE}Checking GitHub runner status...${NC}"
+    github_status_body || true
+    echo -e "\n  ${DIM}Press any key...${NC}"
+    read -rsn1 || true
+}
+
+# What GitHub lists for each target, plus the local orphan list. Returns 1
+# when any target could not be fetched.
+github_status_body() {
+    local t endpoint out any=0 rc=0
 
     for t in $(known_targets); do
         any=1
@@ -3173,6 +3341,7 @@ check_github_status() {
         else
             gh_last_load
             echo -e "    ${YELLOW}Could not fetch: $(gh_error_note "$GH_CLASS" "$GH_MSG")${NC}"
+            rc=1
         fi
     done
     [[ $any -eq 0 ]] && echo -e "  ${YELLOW}No projects configured${NC}"
@@ -3183,9 +3352,7 @@ check_github_status() {
         sed 's/^/    /' "$ORPHANS_FILE"
         echo -e "  ${DIM}Remove them in GitHub Settings → Actions → Runners, then delete $(basename "$ORPHANS_FILE")${NC}"
     fi
-
-    echo -e "\n  ${DIM}Press any key...${NC}"
-    read -rsn1 || true
+    return $rc
 }
 edit_config() {
     echo ""
@@ -3216,7 +3383,7 @@ edit_config() {
                     RUNNER_NAME_PREFIX="$prefix"
                     save_config
                 else
-                    echo -e "  ${YELLOW}Invalid prefix (letters, numbers, _, - only)${NC}"
+                    echo -e "  ${YELLOW}Invalid prefix (letters, numbers, _, - only; at most 60 characters)${NC}"
                 fi
             fi
             ;;
@@ -3306,7 +3473,13 @@ dashboard_discard() {
 # them against GitHub. SUPERVISOR_TICK is global so the TUI's 'c' key can
 # force a poll on the next tick.
 supervisor_tick() {
+    [[ "$DAEMON_MODE" == "1" ]] && config_reload_if_changed
     supervise_runners || true
+    # --poll from another process: poll GitHub on this tick
+    if [[ -f "$PID_DIR/poll.request" ]]; then
+        rm -f "$PID_DIR/poll.request"
+        [[ "$GH_HEALTH_TICKS" -gt 0 ]] && SUPERVISOR_TICK=$((GH_HEALTH_TICKS - 1))
+    fi
     if [[ "$GH_HEALTH_TICKS" -gt 0 ]]; then
         SUPERVISOR_TICK=$((SUPERVISOR_TICK + 1))
         if [[ $SUPERVISOR_TICK -ge $GH_HEALTH_TICKS ]]; then
@@ -3319,17 +3492,46 @@ supervisor_tick() {
     return 0
 }
 
-# Guard against bad values busy-looping the supervisor or breaking arithmetic
+# Guard against bad values busy-looping the supervisor or breaking
+# arithmetic: reset what isn't a number, clamp what is out of range. Each
+# change is noted in CONFIG_WARNINGS (C2) so the TUI can show "clamped".
+# _clamp KEY MIN MAX DEFAULT
+_clamp() {
+    local k=$1 lo=$2 hi=$3 def=$4 v
+    eval "v=\${$k:-}"
+    if [[ ! "$v" =~ ^[0-9]{1,9}$ ]]; then
+        [[ -n "$v" ]] && config_warn "$k='$v' is not a number - using $def"
+        v=$def
+    else
+        v=$((10#$v))
+        if [[ $v -lt $lo ]]; then
+            config_warn "$k clamped to $lo (was $v)"; v=$lo
+        elif [[ $v -gt $hi ]]; then
+            config_warn "$k clamped to $hi (was $v)"; v=$hi
+        fi
+    fi
+    eval "$k=\$v"
+}
+
+_bool() {
+    local k=$1 def=$2 v
+    eval "v=\${$k:-}"
+    if [[ ! "$v" =~ ^[01]$ ]]; then
+        config_warn "$k='$v' must be 0 or 1 - using $def"
+        eval "$k=\$def"
+    fi
+}
+
 sanitize_settings() {
-    [[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ && "$REFRESH_INTERVAL" -ge 1 ]] || REFRESH_INTERVAL=5
-    [[ "$MAX_RESTART_ATTEMPTS" =~ ^[0-9]+$ && "$MAX_RESTART_ATTEMPTS" -ge 1 ]] || MAX_RESTART_ATTEMPTS=5
-    [[ "$MAX_LOG_SIZE_MB" =~ ^[0-9]+$ && "$MAX_LOG_SIZE_MB" -ge 1 ]] || MAX_LOG_SIZE_MB=10
-    [[ "$GH_HEALTH_TICKS" =~ ^[0-9]+$ ]] || GH_HEALTH_TICKS=12
-    [[ "$MAX_RUNNERS" =~ ^[0-9]+$ && "$MAX_RUNNERS" -ge 1 ]] || MAX_RUNNERS=20
-    [[ "$SHARED_TOOL_CACHE" =~ ^[01]$ ]] || SHARED_TOOL_CACHE=1
-    [[ "$EPHEMERAL_RUNNERS" =~ ^[01]$ ]] || EPHEMERAL_RUNNERS=0
-    [[ "$AUTOSCALE" =~ ^[01]$ ]] || AUTOSCALE=0
-    [[ "$AUTOSCALE_IDLE_MINUTES" =~ ^[0-9]+$ ]] || AUTOSCALE_IDLE_MINUTES=10
+    _clamp REFRESH_INTERVAL 1 3600 5
+    _clamp MAX_RESTART_ATTEMPTS 1 100 5
+    _clamp MAX_LOG_SIZE_MB 1 10000 10
+    _clamp GH_HEALTH_TICKS 0 100000 12
+    _clamp MAX_RUNNERS 1 500 20
+    _clamp AUTOSCALE_IDLE_MINUTES 0 100000 10
+    _bool SHARED_TOOL_CACHE 1
+    _bool EPHEMERAL_RUNNERS 0
+    _bool AUTOSCALE 0
     return 0
 }
 
@@ -4045,7 +4247,188 @@ cli_runner_cmd() {
     return 0
 }
 
-CLI_CMD=""; CLI_RUNNER=""; STATUS_JSON=0
+# --set-bounds TARGET=MIN-MAX | TARGET=none. Sets BOUNDS_URL, BOUNDS_MIN,
+# BOUNDS_MAX (both empty for none). MAX_RUNNERS is checked later, once the
+# config is loaded.
+parse_bounds_arg() {
+    local t b
+    [[ "$1" == *=* ]] || return 1
+    t=${1%=*}; b=${1##*=}
+    BOUNDS_URL=$(target_entry_to_url "$t")
+    valid_target_url "$BOUNDS_URL" || return 1
+    if [[ "$b" == "none" ]]; then
+        BOUNDS_MIN=""; BOUNDS_MAX=""
+        return 0
+    fi
+    [[ "$b" =~ ^([0-9]{1,6})-([0-9]{1,6})$ ]] || return 1
+    BOUNDS_MIN=$((10#${BASH_REMATCH[1]})); BOUNDS_MAX=$((10#${BASH_REMATCH[2]}))
+    [[ $BOUNDS_MIN -le $BOUNDS_MAX ]] || return 1
+    return 0
+}
+
+cli_add_target() {
+    local url
+    url=$(target_entry_to_url "$1")
+    valid_target_url "$url" || { echo "Error: invalid target: $1 (expected owner/repo, org, or URL)" >&2; return 2; }
+    if ! target_accessible "$url"; then
+        gh_last_load
+        echo -e "${RED}Error: can't use $(target_label "$url"): $(gh_error_note "$GH_CLASS" "$GH_MSG")${NC}" >&2
+        return 1
+    fi
+    if target_in_file "$url"; then
+        echo "$(target_label "$url") is already listed"
+    else
+        add_target_to_file "$url"
+        echo "added $(target_label "$url")"
+    fi
+    return 0
+}
+
+cli_remove_target() {
+    local url n key
+    url=$(target_entry_to_url "$1")
+    valid_target_url "$url" || { echo "Error: invalid target: $1 (expected owner/repo, org, or URL)" >&2; return 2; }
+    n=$(count_runners_for_target "$url")
+    if [[ $n -gt 0 ]]; then
+        echo -e "${RED}Error: $(target_label "$url") still has $n runner(s) - run --scale $(target_label "$url" | cut -d' ' -f1)=0 first${NC}" >&2
+        return 1
+    fi
+    remove_target_from_file "$url"
+    key=$(target_key "$url")
+    rm -f "$PID_DIR/want-$key.txt" "$PID_DIR/queue-$key.txt" "$PID_DIR/idle-since-$key" "$(target_err_file "$url")"
+    echo "removed $(target_label "$url")"
+    return 0
+}
+
+cli_set_bounds() {
+    if [[ -n "$BOUNDS_MAX" && $BOUNDS_MAX -gt $MAX_RUNNERS ]]; then
+        echo "Error: max $BOUNDS_MAX is over MAX_RUNNERS ($MAX_RUNNERS)" >&2
+        return 2
+    fi
+    set_target_bounds "$BOUNDS_URL" "$BOUNDS_MIN" "$BOUNDS_MAX"
+    if [[ -n "$BOUNDS_MIN" ]]; then
+        echo "$(target_label "$BOUNDS_URL"): autoscale between $BOUNDS_MIN and $BOUNDS_MAX"
+        [[ "$AUTOSCALE" == "1" ]] || echo -e "${DIM}Note: AUTOSCALE=0, so the bounds apply once it is on (--set-config AUTOSCALE=1)${NC}" >&2
+    else
+        echo "$(target_label "$BOUNDS_URL"): bounds cleared (fixed count)"
+    fi
+    return 0
+}
+
+# --set-config KEY=VALUE [...]: validate all, then save once
+SETCFG_ARGS=()
+cli_set_config() {
+    local i k v w before=${#CONFIG_WARNINGS[@]}
+    for ((i = 0; i < ${#SETCFG_ARGS[@]}; i += 2)); do
+        config_set "${SETCFG_ARGS[i]}" "${SETCFG_ARGS[i+1]}" || return 2
+    done
+    sanitize_settings
+    save_config quiet
+    for ((i = 0; i < ${#SETCFG_ARGS[@]}; i += 2)); do
+        k=${SETCFG_ARGS[i]}
+        eval "v=\${$k:-}"
+        echo "$k=$v"
+    done
+    for ((i = before; i < ${#CONFIG_WARNINGS[@]}; i++)); do
+        w=${CONFIG_WARNINGS[i]}
+        echo -e "${YELLOW}Note: $w${NC}" >&2
+    done
+    return 0
+}
+
+# --auth-check [--json]: read-only. 0 when gh works and no target lacks a scope
+cli_auth_check() {
+    local t e bad=0 sep="" out
+    mkdir -p "$PID_DIR" 2>/dev/null || true
+    if [[ $STATUS_JSON -eq 1 ]]; then
+        gh_auth_probe quiet >/dev/null 2>&1 || bad=1
+    else
+        out=$(gh_auth_probe 2>&1) || bad=1
+        [[ -n "$out" ]] && echo "$out"
+        [[ $bad -eq 1 ]] && echo -e "${RED}✗ gh: $(gh_error_note "$(gh_state)" "$(cat "$PID_DIR/gh.msg" 2>/dev/null || true)")${NC}"
+    fi
+    for t in $(known_targets); do
+        e=$(target_error "$t")
+        [[ "${e%%$'\t'*}" == "scope" ]] && bad=1
+    done
+    if [[ $STATUS_JSON -eq 1 ]]; then
+        printf '{"gh":{"user":%s,"host":%s,"scopes":%s,"state":%s,"message":%s},"targets":[' \
+            "$(json_str_null "$(cat "$PID_DIR/gh.user" 2>/dev/null || true)")" \
+            "$(json_str "$(cat "$PID_DIR/gh.host" 2>/dev/null || echo github.com)")" \
+            "$(json_str_list "$(cat "$PID_DIR/gh.scopes" 2>/dev/null || true)")" \
+            "$(json_str "$(gh_state)")" \
+            "$(json_str_null "$(cat "$PID_DIR/gh.msg" 2>/dev/null || true)")"
+        for t in $(known_targets); do
+            e=$(target_error "$t")
+            printf '%s{"url":%s,"label":%s,"error":' "$sep" "$(json_str "$t")" "$(json_str "$(target_label "$t")")"
+            if [[ -n "$e" ]]; then
+                printf '{"class":%s,"message":%s}}' "$(json_str "${e%%$'\t'*}")" \
+                    "$(json_str "$(gh_error_note "${e%%$'\t'*}" "${e#*$'\t'}")")"
+            else
+                printf 'null}'
+            fi
+            sep=","
+        done
+        printf ']}\n'
+    elif [[ $bad -eq 0 ]]; then
+        echo -e "${GREEN}✓ every target has the access it needs${NC}"
+    fi
+    return $bad
+}
+
+# --relogin: interactive gh auth login with the scopes the runners need
+cli_relogin() {
+    local host
+    if [[ ! -t 0 ]]; then
+        echo "Error: --relogin needs a terminal (gh auth login is interactive)" >&2
+        return 2
+    fi
+    host=$(cat "$PID_DIR/gh.host" 2>/dev/null) || host=""
+    [[ -n "$host" ]] || host=${GH_HOST:-github.com}
+    "$GH_BIN" auth login -h "$host" -s repo,admin:org,workflow || return 1
+    rm -f "$PID_DIR/gh.err"
+    mkdir -p "$PID_DIR" 2>/dev/null || true
+    gh_auth_probe || return 1
+    return 0
+}
+
+# --poll: ask the daemon to poll GitHub on its next tick, or poll now
+cli_poll() {
+    if [[ $CLI_SUPERVISED -eq 1 ]]; then
+        touch "$PID_DIR/poll.request"
+        echo "the daemon polls GitHub on its next tick"
+        return 0
+    fi
+    rm -f "$PID_DIR/poll.request"
+    check_github_health || true
+    echo "polled GitHub"
+    return 0
+}
+
+# --stop-all / --start-all (no prompt: scripts can't answer one)
+cli_all() {
+    local action=$1 id failed=0 any=0
+    for id in $(get_runner_ids); do
+        any=1
+        if [[ "$action" == "stop" ]]; then
+            is_busy "$id" && warn "runner-$id is mid-job - stopping it anyway"
+            stop_runner "$id" || failed=1
+            echo "runner-$id stopped"
+        else
+            clear_failure_state "$id"
+            if start_runner "$id"; then
+                echo "runner-$id running"
+            else
+                echo -e "${RED}runner-$id failed to start: $(get_lasterr "$id")${NC}" >&2
+                failed=1
+            fi
+        fi
+    done
+    [[ $any -eq 1 ]] || echo "no runners"
+    return $failed
+}
+
+CLI_CMD=""; CLI_RUNNER=""; CLI_ARG=""; STATUS_JSON=0
 set_cli_cmd() {
     if [[ -n "$CLI_CMD" && "$CLI_CMD" != "$1" ]]; then
         echo "Error: --$CLI_CMD and --$1 can't be combined (one command at a time)" >&2
@@ -4071,19 +4454,29 @@ run_cli() {
         stop-daemon)       cli_stop_daemon || rc=$? ;;
         install-service)   install_service || rc=$? ;;
         uninstall-service) uninstall_service || rc=$? ;;
+        auth-check)        cli_auth_check || rc=$? ;;
+        relogin)           cli_relogin || rc=$? ;;
+        gh-status)         github_status_body || rc=$? ;;
         *)
             [[ -f "$CONFIG_FILE" ]] || die "No configuration found - run --setup first"
             validate_config >&2 || die "Invalid configuration in $CONFIG_FILE - fix it or run --setup"
             mkdir -p "$RUNNER_BASE_DIR" "$PID_DIR" "$LOG_DIR"
             cli_lock
-            if [[ "$CLI_CMD" == "scale" ]]; then
-                cli_scale || rc=$?
-            else
-                cli_runner_cmd "$CLI_CMD" "$CLI_RUNNER" || rc=$?
-            fi
+            case "$CLI_CMD" in
+                scale)         cli_scale || rc=$? ;;
+                add-target)    cli_add_target "$CLI_ARG" || rc=$? ;;
+                remove-target) cli_remove_target "$CLI_ARG" || rc=$? ;;
+                set-bounds)    cli_set_bounds || rc=$? ;;
+                set-config)    cli_set_config || rc=$? ;;
+                poll)          cli_poll || rc=$? ;;
+                stop-all)      cli_all stop || rc=$? ;;
+                start-all)     cli_all start || rc=$? ;;
+                *)             cli_runner_cmd "$CLI_CMD" "$CLI_RUNNER" || rc=$? ;;
+            esac
             # No daemon will refresh state.json after this change: do it here
             [[ $CLI_SUPERVISED -eq 0 ]] && write_state_snapshot cli
-            if [[ $CLI_SUPERVISED -eq 0 && "$CLI_CMD" != "stop" && $rc -ne 2 ]]; then
+            if [[ $CLI_SUPERVISED -eq 0 && $rc -ne 2 ]] \
+                && case "$CLI_CMD" in scale|start|start-all|drain|remove) true ;; *) false ;; esac; then
                 echo -e "${DIM}Note: no daemon is running, so runners are not supervised (no auto-restart, drains not finished) - start one with --daemon or --install-service${NC}" >&2
             fi
             ;;
@@ -4147,13 +4540,36 @@ while [[ $# -gt 0 ]]; do
             SCALE_ARGS+=("$SCALE_URL" "$SCALE_N")
             shift
             ;;
-        --drain|--stop|--start|--remove)
+        --drain|--stop|--start|--remove|--retry)
             [[ -n "${2:-}" ]] || { echo "Error: $1 needs a runner id" >&2; exit 2; }
-            set_cli_cmd "${1#--}"
+            c=${1#--}; [[ "$c" == "retry" ]] && c=start     # --retry = --start
+            set_cli_cmd "$c"
             CLI_RUNNER="$2"
             shift
             ;;
-        --stop-daemon|--install-service|--uninstall-service)
+        --add-target|--remove-target)
+            [[ -n "${2:-}" && "$2" != --* ]] || { echo "Error: $1 needs a target (owner/repo, org, or URL)" >&2; exit 2; }
+            set_cli_cmd "${1#--}"
+            CLI_ARG="$2"
+            shift
+            ;;
+        --set-bounds)
+            [[ -n "${2:-}" ]] || { echo "Error: --set-bounds needs TARGET=MIN-MAX or TARGET=none" >&2; exit 2; }
+            parse_bounds_arg "$2" || { echo "Error: invalid --set-bounds $2 (expected owner/repo=MIN-MAX with MIN <= MAX, or owner/repo=none)" >&2; exit 2; }
+            set_cli_cmd set-bounds
+            shift
+            ;;
+        --set-config)
+            [[ "${2:-}" == *=* ]] || { echo "Error: --set-config needs KEY=VALUE" >&2; exit 2; }
+            case " $CONFIG_KEYS " in
+                *" ${2%%=*} "*) ;;
+                *) echo "Error: unknown setting '${2%%=*}' (settings: $CONFIG_KEYS)" >&2; exit 2 ;;
+            esac
+            set_cli_cmd set-config
+            SETCFG_ARGS+=("${2%%=*}" "${2#*=}")
+            shift
+            ;;
+        --stop-daemon|--install-service|--uninstall-service|--auth-check|--relogin|--poll|--gh-status|--stop-all|--start-all)
             set_cli_cmd "${1#--}"
             ;;
         --version|-v)
@@ -4186,6 +4602,17 @@ while [[ $# -gt 0 ]]; do
             echo "  --stop ID            Stop runner ID (stays down until --start)"
             echo "  --start ID           Start runner ID (clears quarantine)"
             echo "  --remove ID          Unregister and delete runner ID now"
+            echo "  --retry ID           Same as --start (retry a quarantined runner)"
+            echo "  --stop-all           Stop every runner (even mid-job)"
+            echo "  --start-all          Start every runner (clears quarantine)"
+            echo "  --add-target TARGET  Add a project after checking gh can reach it"
+            echo "  --remove-target TARGET  Remove a project with no runners left"
+            echo "  --set-bounds TARGET=MIN-MAX|TARGET=none  Autoscale bounds for a project"
+            echo "  --set-config KEY=VALUE   Change a setting (repeatable; see .runnermaxxer.conf.sample)"
+            echo "  --auth-check [--json]    Check gh login, scopes, and per-project access"
+            echo "  --relogin            Run gh auth login with the scopes runners need (needs a terminal)"
+            echo "  --poll               Poll GitHub now (or on the daemon's next tick)"
+            echo "  --gh-status          List the runners GitHub has registered per project"
             echo ""
             echo "Configuration:"
             echo "  Copy .runnermaxxer.conf.sample to .runnermaxxer.conf"
@@ -4202,8 +4629,8 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-if [[ $STATUS_JSON -eq 1 && "$CLI_CMD" != "status" ]]; then
-    echo "Error: --json only goes with --status" >&2
+if [[ $STATUS_JSON -eq 1 && "$CLI_CMD" != "status" && "$CLI_CMD" != "auth-check" ]]; then
+    echo "Error: --json only goes with --status or --auth-check" >&2
     exit 2
 fi
 if [[ -n "$CLI_CMD" ]]; then
@@ -4242,6 +4669,7 @@ elif [[ ! -f "$CONFIG_FILE" ]]; then
 elif ! validate_config; then
     echo ""
     echo -e "${YELLOW}Configuration issues detected.${NC}"
+    [[ -t 0 ]] || die "Invalid configuration in $CONFIG_FILE and no terminal to ask - fix it or run --setup"
     printf 'Would you like to run setup to fix them? [Y/n]: '
     read -r fix_choice
     if [[ ! "$fix_choice" =~ ^[Nn] ]]; then

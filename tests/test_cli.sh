@@ -232,3 +232,102 @@ t_eq "1" "$(run_copy --daemon >/dev/null 2>&1; echo $?)" "--daemon without a con
 t_eq "1" "$(run_copy --stop 1 >/dev/null 2>&1; echo $?)" "--stop without a config exits 1"
 t_eq "0" "$(run_copy --stop-daemon >/dev/null 2>&1; echo $?)" "--stop-daemon with no daemon exits 0"
 t_fail_ok "none of these leave a lock behind" test -e "$LOCK_FILE"
+
+# --- parse_bounds_arg ----------------------------------------------------------
+parse_bounds_arg "o/r=1-5"
+t_eq "https://github.com/o/r 1 5" "$BOUNDS_URL $BOUNDS_MIN $BOUNDS_MAX" "parse_bounds_arg T=MIN-MAX"
+parse_bounds_arg "myorg=none"
+t_eq "https://github.com/myorg||" "$BOUNDS_URL|$BOUNDS_MIN|$BOUNDS_MAX" "parse_bounds_arg T=none clears"
+parse_bounds_arg "o/r=02-03"
+t_eq "2 3" "$BOUNDS_MIN $BOUNDS_MAX" "parse_bounds_arg strips leading zeros"
+t_fail_ok "parse_bounds_arg rejects MIN > MAX" parse_bounds_arg "o/r=5-1"
+t_fail_ok "parse_bounds_arg rejects a single number" parse_bounds_arg "o/r=1"
+t_fail_ok "parse_bounds_arg rejects a non-number" parse_bounds_arg "o/r=1-x"
+t_fail_ok "parse_bounds_arg rejects a bad target" parse_bounds_arg "a b=1-2"
+
+# --- new verbs: flag parsing ---------------------------------------------------
+t_eq "2" "$(run_copy --set-bounds nope >/dev/null 2>&1; echo $?)" "--set-bounds nope -> 2"
+t_eq "2" "$(run_copy --add-target >/dev/null 2>&1; echo $?)" "--add-target without a value -> 2"
+t_eq "2" "$(run_copy --set-config NOPE=1 >/dev/null 2>&1; echo $?)" "--set-config unknown key -> 2"
+t_eq "2" "$(run_copy --set-config MAX_RUNNERS >/dev/null 2>&1; echo $?)" "--set-config without = -> 2"
+t_eq "2" "$(run_copy --retry >/dev/null 2>&1; echo $?)" "--retry without an id -> 2"
+t_eq "2" "$(run_copy --poll --stop-all >/dev/null 2>&1; echo $?)" "two new verbs -> 2"
+t_eq "2" "$(run_copy --relogin </dev/null >/dev/null 2>&1; echo $?)" "--relogin without a terminal -> 2"
+t_eq "2" "$(run_copy --stop-all --json >/dev/null 2>&1; echo $?)" "--json with --stop-all -> 2"
+help=$(run_copy --help)
+for verb in --add-target --remove-target --set-bounds --set-config --retry --auth-check --relogin --poll --gh-status --stop-all --start-all; do
+    t_ok "--help mentions $verb" grep -q -- "$verb" <<< "$help"
+done
+
+# --- new verbs end to end, with a gh shim on PATH --------------------------------
+printf 'RUNNER_NAME_PREFIX="t"\nMAX_RUNNERS="10"\n' > "$CONFIG_FILE"
+printf 'a/b\n' > "$TARGETS_FILE"
+SHIMDIR=$(make_gh_shim '
+case "$*" in
+  "auth status"*) exit 0 ;;
+  *"repos/o/r"*) echo "{}" ;;
+  *"repos/o/gone"*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+  *"-i user"*) printf "HTTP/2.0 200 OK\r\nX-OAuth-Scopes: repo, admin:org\r\n\r\n{\"login\":\"shimuser\"}\n" ;;
+  *) echo "{}" ;;
+esac')
+run_shim() { PATH="$SHIMDIR:$PATH" run_copy "$@"; }
+
+out=$(run_shim --add-target o/r 2>&1); rc=$?
+t_eq "0" "$rc" "--add-target o/r -> 0"
+t_ok "--add-target prints what it added" grep -q 'added o/r' <<< "$out"
+t_ok "--add-target writes the targets file" grep -qx 'o/r' "$TARGETS_FILE"
+t_ok "a mutating verb refreshes state.json when no daemon runs" grep -q '"writer":"cli"' "$PID_DIR/state.json"
+out=$(run_shim --add-target o/gone 2>&1); rc=$?
+t_eq "1" "$rc" "--add-target of a 404 -> 1"
+t_ok "the 404 is explained" grep -q '404' <<< "$out"
+t_fail_ok "a failed add doesn't touch the targets file" grep -q 'o/gone' "$TARGETS_FILE"
+t_eq "2" "$(run_shim --add-target 'a b' >/dev/null 2>&1; echo $?)" "--add-target of an invalid target -> 2"
+
+t_eq "0" "$(run_shim --set-bounds o/r=1-3 >/dev/null 2>&1; echo $?)" "--set-bounds o/r=1-3 -> 0"
+t_ok "bounds written to the targets line" grep -qx 'o/r min=1 max=3' "$TARGETS_FILE"
+t_eq "2" "$(run_shim --set-bounds o/r=1-11 >/dev/null 2>&1; echo $?)" "--set-bounds over MAX_RUNNERS -> 2"
+t_eq "0" "$(run_shim --set-bounds o/r=none >/dev/null 2>&1; echo $?)" "--set-bounds o/r=none -> 0"
+t_ok "bounds cleared" grep -qx 'o/r' "$TARGETS_FILE"
+
+echo 4 > "$PID_DIR/want-o+r.txt"
+t_eq "0" "$(run_shim --remove-target o/r >/dev/null 2>&1; echo $?)" "--remove-target o/r -> 0"
+t_fail_ok "target gone from the file" grep -q 'o/r' "$TARGETS_FILE"
+t_fail_ok "its want file removed" test -e "$PID_DIR/want-o+r.txt"
+out=$(run_shim --remove-target a/b 2>&1); rc=$?
+t_eq "1" "$rc" "--remove-target with runners registered to it -> 1"
+t_ok "the refusal says how to scale down" grep -q -- '--scale a/b=0' <<< "$out"
+
+out=$(run_shim --set-config MAX_RUNNERS=7 --set-config AUTOSCALE=1 2>&1); rc=$?
+t_eq "0" "$rc" "--set-config (repeated) -> 0"
+t_ok "config file has the new value" grep -qx 'MAX_RUNNERS="7"' "$CONFIG_FILE"
+t_ok "config file has the second value" grep -qx 'AUTOSCALE="1"' "$CONFIG_FILE"
+t_ok "prints the effective value" grep -qx 'MAX_RUNNERS=7' <<< "$out"
+t_ok "unrelated keys are kept" grep -qx 'RUNNER_NAME_PREFIX="t"' "$CONFIG_FILE"
+t_eq "2" "$(run_shim --set-config REFRESH_INTERVAL=0 >/dev/null 2>&1; echo $?)" "--set-config REFRESH_INTERVAL=0 -> 2"
+t_ok "a rejected value is not saved" grep -qx 'REFRESH_INTERVAL="5"' "$CONFIG_FILE"
+out=$(run_shim --set-config REFRESH_INTERVAL=99999 2>&1)
+t_ok "an out-of-range value is clamped and saved" grep -qx 'REFRESH_INTERVAL="3600"' "$CONFIG_FILE"
+t_ok "the clamp is reported" grep -q 'clamped to 3600' <<< "$out"
+run_shim --set-config REFRESH_INTERVAL=5 >/dev/null 2>&1
+
+out=$(run_shim --auth-check 2>&1); rc=$?
+t_eq "0" "$rc" "--auth-check with a good token -> 0"
+t_ok "--auth-check prints the user" grep -q 'shimuser' <<< "$out"
+json=$(run_shim --auth-check --json 2>/dev/null)
+if command -v python3 >/dev/null 2>&1; then
+    t_eq "shimuser ['repo', 'admin:org'] ok" "$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d["gh"]["user"], d["gh"]["scopes"], d["gh"]["state"])' "$json" 2>&1)" "--auth-check --json"
+fi
+BADDIR="$TEST_TMP_DIR/badbin"; mkdir -p "$BADDIR"
+printf '#!/bin/sh\necho "gh: Bad credentials (HTTP 401)" >&2\nexit 1\n' > "$BADDIR/gh"; chmod +x "$BADDIR/gh"
+t_eq "1" "$(PATH="$BADDIR:$PATH" run_copy --auth-check >/dev/null 2>&1; echo $?)" "--auth-check with a rejected token -> 1"
+t_eq "auth" "$(cat "$PID_DIR/gh.state")" "and records gh.state=auth"
+
+out=$(run_shim --gh-status 2>&1); rc=$?
+t_eq "0" "$rc" "--gh-status -> 0"
+t_ok "--gh-status lists each target" grep -q 'a/b' <<< "$out"
+t_eq "0" "$(run_shim --poll >/dev/null 2>&1; echo $?)" "--poll without a daemon polls now -> 0"
+t_eq "2" "$(run_shim --retry 99 >/dev/null 2>&1; echo $?)" "--retry of an unknown runner -> 2 (same as --start)"
+rm -f "$PID_DIR"/runner-*.stopped
+t_eq "0" "$(run_shim --stop-all >/dev/null 2>&1; echo $?)" "--stop-all -> 0"
+t_ok "--stop-all marks every runner stopped" test -f "$PID_DIR/runner-1.stopped" -a -f "$PID_DIR/runner-3.stopped"
+t_fail_ok "no lock left behind by the new verbs" test -e "$LOCK_FILE"

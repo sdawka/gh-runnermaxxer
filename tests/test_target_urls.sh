@@ -6,6 +6,11 @@ t_eq "https://github.com/owner/repo" "$(normalize_url "https://github.com/owner/
 t_eq "https://github.com/owner/repo" "$(normalize_url "https://github.com/owner/repo.git")" "normalize_url strips .git suffix"
 t_eq "https://github.com/owner/repo" "$(normalize_url "https://github.com/owner/repo.git/")" "normalize_url strips .git then trailing slash"
 t_eq "https://github.com/owner/repo" "$(normalize_url "https://github.com/owner/repo")" "normalize_url is a no-op on a clean url"
+t_eq "https://github.com/owner/repo" "$(normalize_url "git@github.com:owner/repo.git")" "normalize_url maps an SSH clone URL"
+t_eq "https://github.com/owner/repo" "$(normalize_url "git@github.com:owner/repo")" "normalize_url maps an SSH URL without .git"
+t_eq "https://github.com/owner/repo" "$(normalize_url "ssh://git@github.com/owner/repo.git")" "normalize_url maps an ssh:// URL"
+t_eq "https://github.com/owner/repo" "$(target_entry_to_url "git@github.com:owner/repo.git")" "target_entry_to_url accepts an SSH clone URL"
+t_eq "https://github.com/owner/repo" "$(target_entry_to_url "ssh://git@github.com/owner/repo")" "target_entry_to_url accepts an ssh:// URL"
 
 # target_entry_to_url
 t_eq "https://github.com/owner/repo" "$(target_entry_to_url "owner/repo")" "target_entry_to_url expands owner/repo"

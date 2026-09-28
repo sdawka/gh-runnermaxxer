@@ -5,6 +5,13 @@ source "$(dirname "$0")/_helper.sh"
 t_eq "hello world" "$(lower "Hello World")" "lower lowercases"
 t_eq "already" "$(lower "already")" "lower is a no-op on lowercase input"
 
+# valid_prefix: GitHub caps runner names at 64, so the prefix at 60
+p60=$(printf 'a%.0s' $(seq 1 60))
+t_ok "valid_prefix accepts 60 characters" valid_prefix "$p60"
+t_fail_ok "valid_prefix rejects 61 characters" valid_prefix "${p60}a"
+t_fail_ok "valid_prefix rejects an empty prefix" valid_prefix ""
+t_fail_ok "valid_prefix rejects a dot" valid_prefix "a.b"
+
 # next_free_id: with no runner dirs, first free id is 1
 t_eq "1" "$(next_free_id)" "next_free_id with no runner dirs"
 
