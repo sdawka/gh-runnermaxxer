@@ -41,9 +41,17 @@ PID_DIR="$RUNNER_BASE_DIR/.pids"
 LOG_DIR="$RUNNER_BASE_DIR/.logs"
 LOCK_FILE="$RUNNER_BASE_DIR/.runnermaxxer.lock"
 ORPHANS_FILE="$RUNNER_BASE_DIR/.orphaned-registrations"
+DAEMON_PID_FILE="$RUNNER_BASE_DIR/.daemon.pid"
+OP_LOCK_FILE="$RUNNER_BASE_DIR/.runnermaxxer.op.lock"   # see acquire_op_lock
+DAEMON_LOG="$LOG_DIR/runnermaxxer.log"
+SERVICE_LABEL="com.gh-runnermaxxer"       # launchd label
+SERVICE_UNIT="gh-runnermaxxer.service"    # systemd user unit
 
 LOCK_ACQUIRED=0
+OP_LOCK_ACQUIRED=0
 TUI_ACTIVE=0
+DAEMON_MODE=0
+SUPERVISOR_TICK=0
 RUNNER_TAR=""
 CLI_TARGET=""
 
@@ -79,6 +87,10 @@ cleanup() {
     # that failed preflight doesn't delete the first instance's lock.
     if [[ "$LOCK_ACQUIRED" == "1" ]]; then
         rm -f "$LOCK_FILE"
+    fi
+    [[ "$OP_LOCK_ACQUIRED" == "1" ]] && rm -f "$OP_LOCK_FILE"
+    if [[ "$DAEMON_MODE" == "1" && "$(cat "$DAEMON_PID_FILE" 2>/dev/null)" == "$$" ]]; then
+        rm -f "$DAEMON_PID_FILE"
     fi
     # Restore terminal state in case we die inside `read -s` or a child
     # mangled the tty.
@@ -1408,7 +1420,8 @@ preflight_checks() {
         echo -e "${YELLOW}! No runner tarball found for ${RUNNER_OS}-${RUNNER_ARCH}${NC}"
         printf '  Download the latest release automatically? [Y/n]: '
         local dl_choice=""
-        read -r dl_choice || true
+        # Headless (--daemon): no one to ask, so download
+        [[ "$DAEMON_MODE" == "1" ]] || read -r dl_choice || true
         if [[ ! "$dl_choice" =~ ^[Nn] ]]; then
             download_runner_tarball || true
             RUNNER_TAR=$(detect_runner_tarball)
@@ -1432,6 +1445,7 @@ preflight_checks() {
 
     if ! acquire_lock; then
         local lock_pid
+        lock_pid=$(daemon_pid) && die "$(daemon_running_msg "$lock_pid")"
         lock_pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "?")
         die "Another instance is running (PID $lock_pid). One instance manages every project - press 't' there to add repos/orgs."
     fi
@@ -1509,6 +1523,7 @@ is_marked_stopped() {
 # Draining: remove the runner as soon as its current job finishes
 mark_draining() {
     touch "$PID_DIR/runner-$1.draining"
+    dlog "runner-$1: draining - removed when its job finishes"
 }
 
 unmark_draining() {
@@ -1553,6 +1568,16 @@ registered_name() {
 
 set_lasterr() {
     echo "$2" > "$PID_DIR/runner-$1.lasterr" 2>/dev/null || true
+    dlog "runner-$1: $2"
+}
+
+# Event log for headless mode: one timestamped line per notable event
+# (start/restart/quarantine/recycle/drain/remove) in $DAEMON_LOG. The TUI
+# shows these on screen instead, so this is a no-op outside --daemon.
+dlog() {
+    [[ "$DAEMON_MODE" == "1" ]] || return 0
+    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$DAEMON_LOG" 2>/dev/null || true
+    return 0
 }
 
 get_lasterr() {
@@ -1735,6 +1760,7 @@ supervise_runners() {
         # Draining: remove once idle or exited; never restart it
         if is_draining "$id"; then
             if ! is_busy "$id"; then
+                dlog "runner-$id: drained (no job running) - removing"
                 remove_runner "$id" >/dev/null 2>&1 || true
                 unmark_draining "$id"
             fi
@@ -1759,6 +1785,7 @@ supervise_runners() {
         # without counting it as a crash or applying backoff.
         if ephemeral_job_finished "$id"; then
             rm -f "$PID_DIR/runner-$id.failcount"
+            dlog "runner-$id: ephemeral job finished - re-registering"
             start_runner "$id" >/dev/null 2>&1 || true
             continue
         fi
@@ -1782,6 +1809,7 @@ supervise_runners() {
         # (>=60s above) clears it. start_runner returning 0 after surviving
         # one second says nothing about a runner that crashes at t+2s.
         echo $((fails + 1)) > "$PID_DIR/runner-$id.failcount"
+        dlog "runner-$id: not running - restart attempt $((fails + 1))"
         start_runner "$id" >/dev/null 2>&1 || true
     done
     return 0
@@ -2160,6 +2188,7 @@ start_runner() {
     orphan=$(runner_procs "$id" | head -1)
     if [[ -n "$orphan" ]]; then
         echo "$orphan" > "$pid_file"
+        dlog "runner-$id: adopted running process $orphan"
         return 0
     fi
 
@@ -2194,6 +2223,7 @@ start_runner() {
     fi
 
     rm -f "$PID_DIR/runner-$id.lasterr"
+    dlog "runner-$id: started (pid $pid)"
     return 0
 }
 
@@ -2237,6 +2267,7 @@ stop_runner() {
     # Record that this stop was intentional so the supervisor leaves it down.
     mark_stopped "$id"
     stop_runner_procs "$id"
+    dlog "runner-$id: stopped"
 }
 
 # True when GitHub answers and does not list runner NAME under TARGET_URL
@@ -2282,6 +2313,7 @@ remove_runner() {
 
     rm -f "$LOG_DIR/runner-$id.log" "$LOG_DIR/runner-$id.log.1"
     clear_runner_state "$id"
+    dlog "runner-$id: removed"
 }
 
 # ============================================================================
@@ -2662,7 +2694,7 @@ quit_prompt() {
         read -r ans
         case "$ans" in
             k|K|"")
-                echo -e "\n  ${DIM}Note: runners left running are NOT supervised (no auto-restart) until you reopen the manager.${NC}"
+                echo -e "\n  ${DIM}Note: runners left running are NOT supervised (no auto-restart) until you reopen the manager or start --daemon.${NC}"
                 sleep 1
                 ;;
             x|X)
@@ -2702,6 +2734,618 @@ dashboard_discard() {
 }
 
 # ============================================================================
+# Supervisor tick, headless daemon, service install, scripting CLI
+# ============================================================================
+
+# One supervision step, shared by the TUI loop and --daemon: restart /
+# drain / quarantine runners, and every GH_HEALTH_TICKS ticks cross-check
+# them against GitHub. SUPERVISOR_TICK is global so the TUI's 'c' key can
+# force a poll on the next tick.
+supervisor_tick() {
+    supervise_runners || true
+    if [[ "$GH_HEALTH_TICKS" -gt 0 ]]; then
+        SUPERVISOR_TICK=$((SUPERVISOR_TICK + 1))
+        if [[ $SUPERVISOR_TICK -ge $GH_HEALTH_TICKS ]]; then
+            SUPERVISOR_TICK=0
+            check_github_health || true
+        fi
+    fi
+    return 0
+}
+
+# Guard against bad values busy-looping the supervisor or breaking arithmetic
+sanitize_settings() {
+    [[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ && "$REFRESH_INTERVAL" -ge 1 ]] || REFRESH_INTERVAL=5
+    [[ "$MAX_RESTART_ATTEMPTS" =~ ^[0-9]+$ && "$MAX_RESTART_ATTEMPTS" -ge 1 ]] || MAX_RESTART_ATTEMPTS=5
+    [[ "$MAX_LOG_SIZE_MB" =~ ^[0-9]+$ && "$MAX_LOG_SIZE_MB" -ge 1 ]] || MAX_LOG_SIZE_MB=10
+    [[ "$GH_HEALTH_TICKS" =~ ^[0-9]+$ ]] || GH_HEALTH_TICKS=12
+    [[ "$MAX_RUNNERS" =~ ^[0-9]+$ && "$MAX_RUNNERS" -ge 1 ]] || MAX_RUNNERS=20
+    [[ "$SHARED_TOOL_CACHE" =~ ^[01]$ ]] || SHARED_TOOL_CACHE=1
+    [[ "$EPHEMERAL_RUNNERS" =~ ^[01]$ ]] || EPHEMERAL_RUNNERS=0
+    return 0
+}
+
+# PID of a live --daemon (a stale pid file, or a recycled PID, doesn't count)
+daemon_pid() {
+    local pid
+    pid=$(cat "$DAEMON_PID_FILE" 2>/dev/null) || return 1
+    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
+    ps -p "$pid" -o command= 2>/dev/null | grep -q -- '--daemon' || return 1
+    echo "$pid"
+}
+
+daemon_running_msg() {
+    echo "a daemon is running (pid $1); use --status / --scale, or stop it with --stop-daemon"
+}
+
+# Locking model. The main lock ($LOCK_FILE) is held for the whole life of
+# the TUI or the daemon, so only one of them ever supervises. A mutating CLI
+# command (--scale/--drain/--stop/--start/--remove) then:
+#   - no manager running: takes the main lock itself for its short run, so
+#     a TUI/daemon can't start in the middle of it;
+#   - daemon running: takes this "operation" lock instead. The daemon takes
+#     it too (without waiting) around every supervisor_tick and skips the
+#     tick while a CLI command holds it, so the two never touch runner state
+#     at the same time. The daemon keeps no state in memory between ticks
+#     (everything is re-read from disk), so it simply sees the result on its
+#     next tick;
+#   - TUI running: refused, since the TUI holds unapplied edits in memory.
+# Read-only commands (--status) take no lock at all.
+# acquire_op_lock [SECONDS_TO_WAIT]
+acquire_op_lock() {
+    local wait=${1:-0} lock_pid stale=0
+    while true; do
+        if ( set -o noclobber; echo "$$" > "$OP_LOCK_FILE" ) 2>/dev/null; then
+            OP_LOCK_ACQUIRED=1
+            return 0
+        fi
+        lock_pid=$(cat "$OP_LOCK_FILE" 2>/dev/null || echo "")
+        if [[ $stale -eq 0 ]] && { [[ -z "$lock_pid" ]] || ! kill -0 "$lock_pid" 2>/dev/null; }; then
+            rm -f "$OP_LOCK_FILE"    # holder is gone
+            stale=1
+            continue
+        fi
+        [[ $wait -gt 0 ]] || return 1
+        wait=$((wait - 1))
+        stale=0
+        sleep 1
+    done
+}
+
+release_op_lock() {
+    [[ "$OP_LOCK_ACQUIRED" == "1" ]] && rm -f "$OP_LOCK_FILE"
+    OP_LOCK_ACQUIRED=0
+    return 0
+}
+
+# Take whichever lock a mutating CLI command needs (see acquire_op_lock).
+# Sets CLI_SUPERVISED=1 when a daemon will supervise the result.
+CLI_SUPERVISED=0
+cli_lock() {
+    local pid
+    acquire_lock && return 0
+    if pid=$(daemon_pid); then
+        CLI_SUPERVISED=1
+        acquire_op_lock 60 && return 0
+        die "the daemon (pid $pid) stayed busy for 60s - try again"
+    fi
+    pid=$(cat "$LOCK_FILE" 2>/dev/null || echo "?")
+    die "the manager is open in a terminal (pid $pid) - make the change there, or quit it first"
+}
+
+DAEMON_SLEEP_PID=""
+run_daemon() {
+    echo "$$" > "$DAEMON_PID_FILE"
+    trap daemon_on_signal INT TERM
+    dlog "daemon started (pid $$, $(get_runner_count) runner(s), tick ${REFRESH_INTERVAL}s)"
+    echo "gh-runnermaxxer daemon running (pid $$) - events in $DAEMON_LOG"
+    SUPERVISOR_TICK=$((GH_HEALTH_TICKS - 1))   # first tick polls GitHub
+    while true; do
+        if acquire_op_lock; then
+            supervisor_tick
+            release_op_lock
+        fi
+        # Background + wait so SIGTERM is handled at once, not after the sleep
+        sleep "$REFRESH_INTERVAL" &
+        DAEMON_SLEEP_PID=$!
+        wait "$DAEMON_SLEEP_PID" 2>/dev/null || true
+    done
+}
+
+# Runner processes are detached and deliberately left alive: the next
+# manager (daemon or TUI) re-adopts them in reconcile_state. The EXIT trap
+# (cleanup) releases the locks and the pid file.
+daemon_on_signal() {
+    [[ -n "$DAEMON_SLEEP_PID" ]] && { kill "$DAEMON_SLEEP_PID" 2>/dev/null || true; }
+    dlog "daemon stopping (signal) - runners left running"
+    exit 0
+}
+
+cli_stop_daemon() {
+    local pid waited=0
+    if ! pid=$(daemon_pid); then
+        echo "No daemon running"
+        return 0
+    fi
+    kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [[ $waited -lt 10 ]]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        echo -e "${RED}Daemon (pid $pid) did not exit within 10s${NC}" >&2
+        return 1
+    fi
+    echo "Daemon (pid $pid) stopped; runners keep running, unsupervised"
+    if [[ -f "$(service_file_path)" ]]; then
+        echo "Note: it is installed as a service, which will start it again. To stop it for good: --uninstall-service"
+    fi
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Service files (launchd on macOS, systemd --user on Linux). The generators
+# take every path as an argument so tests can run them without touching $HOME.
+# ----------------------------------------------------------------------------
+
+xml_escape() {
+    local s=$1
+    s=${s//&/"&amp;"}
+    s=${s//</"&lt;"}
+    s=${s//>/"&gt;"}
+    printf '%s' "$s"
+}
+
+# systemd unit values: '%' starts a specifier, so double it
+systemd_escape() {
+    local s=$1
+    s=${s//%/"%%"}
+    printf '%s' "$s"
+}
+
+# PATH for the service: gh's directory (and any other given dirs) first,
+# then the usual system locations, without duplicates
+service_path_value() {
+    local out="" d
+    for d in "$@" /opt/homebrew/bin /usr/local/bin /usr/bin /bin /usr/sbin /sbin; do
+        [[ -n "$d" ]] || continue
+        case ":$out:" in *":$d:"*) continue ;; esac
+        out="${out:+$out:}$d"
+    done
+    echo "$out"
+}
+
+# launchd_plist SCRIPT WORKDIR PATH_VALUE OUT_FILE
+launchd_plist() {
+    local script workdir pathv out
+    script=$(xml_escape "$1"); workdir=$(xml_escape "$2")
+    pathv=$(xml_escape "$3"); out=$(xml_escape "$4")
+    cat << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$SERVICE_LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>$script</string>
+        <string>--daemon</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>$workdir</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>$pathv</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+    <!-- Runners are children of the daemon: keep them alive when it stops -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>$out</string>
+    <key>StandardErrorPath</key>
+    <string>$out</string>
+</dict>
+</plist>
+EOF
+}
+
+# systemd_unit SCRIPT WORKDIR PATH_VALUE
+systemd_unit() {
+    local script bs='\' q='"'
+    script=$(systemd_escape "$1")
+    script=${script//"$bs"/"$bs$bs"}
+    script=${script//"$q"/"$bs$q"}
+    script=${script//\$/"\$\$"}
+    cat << EOF
+[Unit]
+Description=gh-runnermaxxer - GitHub Actions self-hosted runner pool
+
+[Service]
+Type=simple
+ExecStart="$script" --daemon
+WorkingDirectory=$(systemd_escape "$2")
+Environment="PATH=$(systemd_escape "$3")"
+Restart=always
+RestartSec=10
+# Runners are detached children and must outlive daemon restarts: signal
+# only the daemon, not the whole cgroup
+KillMode=process
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+service_file_path() {
+    if [[ "$OS_FAMILY" == "macos" ]]; then
+        echo "$HOME/Library/LaunchAgents/$SERVICE_LABEL.plist"
+    else
+        echo "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$SERVICE_UNIT"
+    fi
+}
+
+install_service() {
+    local script gh_bin path_val file uid pid
+    script="$SCRIPT_DIR/$(basename "$0")"
+    [[ -f "$CONFIG_FILE" ]] || die "No configuration found - run --setup first"
+    gh_bin=$(command -v gh 2>/dev/null) || die "gh CLI not found in PATH"
+    path_val=$(service_path_value "$(dirname "$gh_bin")")
+    file=$(service_file_path)
+    mkdir -p "$LOG_DIR" "$(dirname "$file")"
+
+    case "$OS_FAMILY" in
+        macos)
+            launchd_plist "$script" "$SCRIPT_DIR" "$path_val" "$LOG_DIR/daemon.out" > "$file"
+            echo "Wrote $file"
+            uid=$(id -u)
+            if launchctl bootout "gui/$uid/$SERVICE_LABEL" >/dev/null 2>&1; then
+                sleep 1
+            fi
+            if ! launchctl bootstrap "gui/$uid" "$file" 2>/dev/null; then
+                launchctl load -w "$file" || die "launchctl could not load $file"
+            fi
+            echo "Loaded launchd agent $SERVICE_LABEL (starts at login, restarted if it exits)"
+            echo ""
+            echo "  Status:  launchctl print gui/$uid/$SERVICE_LABEL | head -20"
+            echo "           $script --status"
+            echo "  Logs:    tail -f \"$DAEMON_LOG\" \"$LOG_DIR/daemon.out\""
+            ;;
+        linux)
+            command -v systemctl >/dev/null 2>&1 \
+                || die "systemctl not found - run '$script --daemon' from your init system instead"
+            systemd_unit "$script" "$SCRIPT_DIR" "$path_val" > "$file"
+            echo "Wrote $file"
+            systemctl --user daemon-reload && systemctl --user enable --now "$SERVICE_UNIT" \
+                || die "systemctl --user could not start $SERVICE_UNIT"
+            echo "Enabled and started $SERVICE_UNIT"
+            echo ""
+            echo "  Status:  systemctl --user status $SERVICE_UNIT"
+            echo "           $script --status"
+            echo "  Logs:    journalctl --user -u $SERVICE_UNIT -f"
+            echo "           tail -f \"$DAEMON_LOG\""
+            echo ""
+            echo "  To keep it running while you are logged out (and start at boot):"
+            echo "    loginctl enable-linger $USER"
+            ;;
+        *)
+            die "Unsupported OS for --install-service - run '$script --daemon' from your init system instead"
+            ;;
+    esac
+    if pid=$(cat "$LOCK_FILE" 2>/dev/null) && kill -0 "$pid" 2>/dev/null && [[ "$pid" != "$(daemon_pid || true)" ]]; then
+        warn "The manager is open in a terminal (pid $pid); the service takes over once you quit it"
+    fi
+    return 0
+}
+
+uninstall_service() {
+    local file uid
+    file=$(service_file_path)
+    if [[ ! -f "$file" ]]; then
+        echo "No service installed ($file not found)"
+        return 0
+    fi
+    case "$OS_FAMILY" in
+        macos)
+            uid=$(id -u)
+            launchctl bootout "gui/$uid/$SERVICE_LABEL" >/dev/null 2>&1 \
+                || launchctl unload -w "$file" >/dev/null 2>&1 || true
+            rm -f "$file"
+            ;;
+        *)
+            systemctl --user disable --now "$SERVICE_UNIT" >/dev/null 2>&1 || true
+            rm -f "$file"
+            systemctl --user daemon-reload >/dev/null 2>&1 || true
+            ;;
+    esac
+    echo "Removed $file and stopped the service"
+    echo "Runners keep running but are unsupervised: open the manager, run --daemon, or stop them with --stop <id>"
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# --status
+# ----------------------------------------------------------------------------
+
+# running | idle | busy | draining | stopped | quarantined | restarting
+runner_state() {
+    local id=$1
+    if is_running "$id"; then
+        if is_draining "$id"; then echo "draining"
+        elif is_busy "$id"; then echo "busy"
+        elif [[ "$(get_runner_status "$id")" == idle* ]]; then echo "idle"
+        else echo "running"
+        fi
+    elif is_draining "$id"; then echo "draining"
+    elif is_marked_stopped "$id"; then echo "stopped"
+    elif is_quarantined "$id"; then echo "quarantined"
+    else echo "restarting"
+    fi
+    return 0
+}
+
+# JSON string literal (quotes included)
+json_str() {
+    local s=$1 bs='\' q='"'
+    s=${s//"$bs"/"$bs$bs"}
+    s=${s//"$q"/"$bs$q"}
+    s=${s//$'\n'/"${bs}n"}
+    s=${s//$'\r'/"${bs}r"}
+    s=${s//$'\t'/"${bs}t"}
+    if [[ "$s" == *[[:cntrl:]]* ]]; then
+        s=$(printf '%s' "$s" | LC_ALL=C tr -d '\000-\037\177')
+    fi
+    printf '"%s"' "$s"
+}
+
+# Number or null
+json_num() {
+    if [[ "$1" =~ ^[0-9]+$ ]]; then printf '%s' "$1"; else printf 'null'; fi
+}
+
+# Snapshot every project and runner into parallel arrays (P_* / R_*), so
+# the text and JSON renderers show the same data from one pass.
+status_collect() {
+    local t id st n conf run busy drain ids
+    P_URLS=(); P_LISTED=(); P_CONF=(); P_RUN=(); P_BUSY=(); P_DRAIN=()
+    R_IDS=(); R_PROJ=(); R_STATE=(); R_PID=(); R_STATUS=(); R_ERR=(); R_EPH=()
+    for t in $(known_targets) ""; do
+        if [[ -n "$t" ]]; then ids=$(runner_ids_for_target "$t"); else ids=$(unassigned_runner_ids); fi
+        conf=0; run=0; busy=0; drain=0
+        for id in $ids; do
+            st=$(runner_state "$id")
+            n=${#R_IDS[@]}
+            R_IDS[n]=$id; R_PROJ[n]=$t; R_STATE[n]=$st
+            R_PID[n]=""; R_STATUS[n]=""
+            if is_running "$id"; then
+                R_PID[n]=$(cat "$PID_DIR/runner-$id.pid" 2>/dev/null || echo "")
+                R_STATUS[n]=$(get_runner_status "$id")
+            fi
+            R_ERR[n]=$(get_lasterr "$id")
+            R_EPH[n]=false
+            is_ephemeral "$id" && R_EPH[n]=true
+            case "$st" in
+                draining) drain=$((drain + 1)) ;;
+                busy) busy=$((busy + 1)); run=$((run + 1)); conf=$((conf + 1)) ;;
+                running|idle) run=$((run + 1)); conf=$((conf + 1)) ;;
+                *) conf=$((conf + 1)) ;;
+            esac
+        done
+        [[ -n "$t" ]] || continue
+        n=${#P_URLS[@]}
+        P_URLS[n]=$t; P_CONF[n]=$conf; P_RUN[n]=$run; P_BUSY[n]=$busy; P_DRAIN[n]=$drain
+        P_LISTED[n]=false
+        target_in_file "$t" && P_LISTED[n]=true
+    done
+    return 0
+}
+
+status_json() {
+    local i dpid ts sep=""
+    dpid=$(daemon_pid || true)
+    ts=$(cat "$PID_DIR/gh-poll.ts" 2>/dev/null || true)
+    printf '{"version":%s,"daemon_pid":%s,"max_runners":%s,"github_polled_at":%s,"projects":[' \
+        "$(json_str "$VERSION")" "$(json_num "$dpid")" "$(json_num "$MAX_RUNNERS")" "$(json_num "$ts")"
+    for ((i = 0; i < ${#P_URLS[@]}; i++)); do
+        printf '%s{"url":%s,"label":%s,"listed":%s,"configured":%s,"running":%s,"busy":%s,"draining":%s}' \
+            "$sep" "$(json_str "${P_URLS[i]}")" "$(json_str "$(target_label "${P_URLS[i]}")")" \
+            "${P_LISTED[i]}" "${P_CONF[i]}" "${P_RUN[i]}" "${P_BUSY[i]}" "${P_DRAIN[i]}"
+        sep=","
+    done
+    printf '],"runners":['
+    sep=""
+    for ((i = 0; i < ${#R_IDS[@]}; i++)); do
+        printf '%s{"id":%s,"project":%s,"state":%s,"pid":%s,"status":%s,"ephemeral":%s,"last_error":%s}' \
+            "$sep" "${R_IDS[i]}" \
+            "$([[ -n "${R_PROJ[i]}" ]] && json_str "${R_PROJ[i]}" || printf 'null')" \
+            "$(json_str "${R_STATE[i]}")" "$(json_num "${R_PID[i]}")" \
+            "$(json_str "${R_STATUS[i]}")" "${R_EPH[i]}" \
+            "$([[ -n "${R_ERR[i]}" ]] && json_str "${R_ERR[i]}" || printf 'null')"
+        sep=","
+    done
+    printf ']}\n'
+}
+
+status_text() {
+    local i j dpid detail
+    if dpid=$(daemon_pid); then
+        echo -e "${BOLD}gh-runnermaxxer $VERSION${NC}  daemon: ${GREEN}running (pid $dpid)${NC}"
+    else
+        echo -e "${BOLD}gh-runnermaxxer $VERSION${NC}  daemon: ${DIM}not running${NC}"
+    fi
+    [[ ${#R_IDS[@]} -eq 0 && ${#P_URLS[@]} -eq 0 ]] && { echo "No projects or runners configured"; return 0; }
+    for ((i = 0; i <= ${#P_URLS[@]}; i++)); do
+        # The extra last pass lists runners with no project, if any
+        [[ $i -eq ${#P_URLS[@]} ]] && { [[ ${#R_IDS[@]} -gt 0 && -z "${R_PROJ[${#R_IDS[@]}-1]}" ]] || break; }
+        echo ""
+        if [[ $i -lt ${#P_URLS[@]} ]]; then
+            echo -e "${BOLD}$(target_label "${P_URLS[i]}")${NC}  ${DIM}${P_URLS[i]}${NC}"
+            echo "  configured ${P_CONF[i]}  running ${P_RUN[i]}  busy ${P_BUSY[i]}  draining ${P_DRAIN[i]}"
+        fi
+        for ((j = 0; j < ${#R_IDS[@]}; j++)); do
+            if [[ $i -lt ${#P_URLS[@]} ]]; then
+                [[ "${R_PROJ[j]}" == "${P_URLS[i]}" ]] || continue
+            else
+                [[ -z "${R_PROJ[j]}" ]] || continue
+                [[ $j -eq 0 || -n "${R_PROJ[j-1]}" ]] && echo -e "${YELLOW}Unconfigured (incomplete setup)${NC}"
+            fi
+            detail=${R_STATUS[j]}
+            [[ -n "${R_ERR[j]}" && "${R_STATE[j]}" != running && "${R_STATE[j]}" != idle && "${R_STATE[j]}" != busy ]] \
+                && detail="${detail:+$detail - }${R_ERR[j]}"
+            printf '  %-10s %-12s %-10s %s\n' "runner-${R_IDS[j]}" "${R_STATE[j]}" \
+                "${R_PID[j]:+pid ${R_PID[j]}}" "$detail"
+        done
+    done
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# --scale and single-runner commands
+# ----------------------------------------------------------------------------
+
+# parse_scale_arg TARGET=N -> SCALE_URL, SCALE_N (TARGET in any --target form)
+parse_scale_arg() {
+    local t n
+    [[ "$1" == *=* ]] || return 1
+    t=${1%=*}; n=${1##*=}
+    [[ "$n" =~ ^[0-9]+$ ]] || return 1
+    SCALE_URL=$(target_entry_to_url "$t")
+    valid_target_url "$SCALE_URL" || return 1
+    SCALE_N=$((10#$n))
+    return 0
+}
+
+# Runner total across every target after scaling: scale_total_after URL N
+# [URL N...]. Later pairs win for the same target; targets not named keep
+# their current size (draining runners excluded, as in scale_target).
+scale_total_after() {
+    local args=("$@") total=0 i j dup t
+    for ((i = 0; i < ${#args[@]}; i += 2)); do
+        dup=0
+        for ((j = i + 2; j < ${#args[@]}; j += 2)); do
+            same_target "${args[i]}" "${args[j]}" && dup=1
+        done
+        [[ $dup -eq 1 ]] || total=$((total + ${args[i+1]}))
+    done
+    for t in $(known_targets); do
+        dup=0
+        for ((i = 0; i < ${#args[@]}; i += 2)); do
+            same_target "$t" "${args[i]}" && dup=1
+        done
+        [[ $dup -eq 1 ]] || total=$((total + $(count_runners_for_target "$t")))
+    done
+    echo "$total"
+}
+
+SCALE_ARGS=()
+cli_scale() {
+    local total i url n up=0 failed=0
+    total=$(scale_total_after "${SCALE_ARGS[@]}")
+    if [[ $total -gt $MAX_RUNNERS ]]; then
+        echo -e "${RED}Error: that would make $total runners across all projects, over MAX_RUNNERS ($MAX_RUNNERS)${NC}" >&2
+        return 1
+    fi
+    for ((i = 0; i < ${#SCALE_ARGS[@]}; i += 2)); do
+        [[ ${SCALE_ARGS[i+1]} -gt $(count_runners_for_target "${SCALE_ARGS[i]}") ]] && up=1
+    done
+    if [[ $up -eq 1 ]]; then
+        RUNNER_TAR=$(detect_runner_tarball)
+        [[ -n "$RUNNER_TAR" ]] || die "No runner tarball for ${RUNNER_OS}-${RUNNER_ARCH} - run --download first"
+        gh auth status >/dev/null 2>&1 || die "gh CLI is not authenticated. Run: gh auth login"
+    fi
+    for ((i = 0; i < ${#SCALE_ARGS[@]}; i += 2)); do
+        url=${SCALE_ARGS[i]}; n=${SCALE_ARGS[i+1]}
+        add_target_to_file "$url"
+        if [[ $(count_runners_for_target "$url") -eq $n ]]; then
+            echo "  $(target_label "$url"): already at $n runner(s)"
+            continue
+        fi
+        scale_target "$url" "$n" || failed=1
+    done
+    return $failed
+}
+
+# cli_runner_cmd drain|stop|start|remove ID
+cli_runner_cmd() {
+    local action=$1 id=${2#runner-}
+    [[ "$id" =~ ^[0-9]+$ && -d "$RUNNER_BASE_DIR/runner-$id" ]] \
+        || { echo -e "${RED}Error: no such runner: $2${NC}" >&2; return 2; }
+    case "$action" in
+        drain)
+            mark_draining "$id"
+            if is_busy "$id"; then
+                echo "runner-$id is mid-job: draining, it will be removed when the job finishes"
+            else
+                remove_runner "$id"
+                echo "runner-$id was not running a job: removed"
+            fi
+            ;;
+        stop)
+            stop_runner "$id"
+            echo "runner-$id stopped (it stays down until --start)"
+            ;;
+        start)
+            clear_failure_state "$id"
+            start_runner "$id" || { echo -e "${RED}runner-$id failed to start: $(get_lasterr "$id")${NC}" >&2; return 1; }
+            echo "runner-$id running (pid $(cat "$PID_DIR/runner-$id.pid" 2>/dev/null || echo "?"))"
+            ;;
+        remove)
+            is_busy "$id" && warn "runner-$id is mid-job - killing it (use --drain to let the job finish)"
+            remove_runner "$id"
+            echo "runner-$id removed"
+            ;;
+    esac
+    return 0
+}
+
+CLI_CMD=""; CLI_RUNNER=""; STATUS_JSON=0
+set_cli_cmd() {
+    if [[ -n "$CLI_CMD" && "$CLI_CMD" != "$1" ]]; then
+        echo "Error: --$CLI_CMD and --$1 can't be combined (one command at a time)" >&2
+        exit 2
+    fi
+    CLI_CMD=$1
+}
+
+# Non-interactive commands. Exit status: 0 ok, 1 failed, 2 bad usage.
+run_cli() {
+    local rc=0
+    load_config >&2     # may print a migration note; keep stdout clean for --json
+    sanitize_settings
+    case "$CLI_CMD" in
+        status)
+            status_collect
+            if [[ $STATUS_JSON -eq 1 ]]; then status_json; else status_text; fi
+            ;;
+        stop-daemon)       cli_stop_daemon || rc=$? ;;
+        install-service)   install_service || rc=$? ;;
+        uninstall-service) uninstall_service || rc=$? ;;
+        *)
+            [[ -f "$CONFIG_FILE" ]] || die "No configuration found - run --setup first"
+            validate_config >&2 || die "Invalid configuration in $CONFIG_FILE - fix it or run --setup"
+            mkdir -p "$RUNNER_BASE_DIR" "$PID_DIR" "$LOG_DIR"
+            cli_lock
+            if [[ "$CLI_CMD" == "scale" ]]; then
+                cli_scale || rc=$?
+            else
+                cli_runner_cmd "$CLI_CMD" "$CLI_RUNNER" || rc=$?
+            fi
+            if [[ $CLI_SUPERVISED -eq 0 && "$CLI_CMD" != "stop" && $rc -ne 2 ]]; then
+                echo -e "${DIM}Note: no daemon is running, so runners are not supervised (no auto-restart, drains not finished) - start one with --daemon or --install-service${NC}" >&2
+            fi
+            ;;
+    esac
+    return $rc
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -2713,6 +3357,11 @@ if [[ "${RUNNERMAXXER_LIB:-0}" == "1" ]]; then
 fi
 
 detect_platform
+
+# Plain output when piped/scripted (and under --daemon, which logs to a file)
+if [[ ! -t 1 ]]; then
+    RED=''; GREEN=''; YELLOW=''; BLUE=''; CYAN=''; BOLD=''; DIM=''; NC=''
+fi
 
 # Handle command-line flags
 SKIP_MENU=0
@@ -2736,6 +3385,31 @@ while [[ $# -gt 0 ]]; do
         --no-menu)
             SKIP_MENU=1
             ;;
+        --daemon)
+            DAEMON_MODE=1
+            ;;
+        --status)
+            set_cli_cmd status
+            ;;
+        --json)
+            STATUS_JSON=1
+            ;;
+        --scale)
+            [[ -n "${2:-}" ]] || { echo "Error: --scale needs TARGET=N" >&2; exit 2; }
+            parse_scale_arg "$2" || { echo "Error: invalid --scale $2 (expected owner/repo=N, org=N, or URL=N)" >&2; exit 2; }
+            set_cli_cmd scale
+            SCALE_ARGS+=("$SCALE_URL" "$SCALE_N")
+            shift
+            ;;
+        --drain|--stop|--start|--remove)
+            [[ -n "${2:-}" ]] || { echo "Error: $1 needs a runner id" >&2; exit 2; }
+            set_cli_cmd "${1#--}"
+            CLI_RUNNER="$2"
+            shift
+            ;;
+        --stop-daemon|--install-service|--uninstall-service)
+            set_cli_cmd "${1#--}"
+            ;;
         --version|-v)
             echo "gh-runnermaxxer $VERSION"
             exit 0
@@ -2753,6 +3427,20 @@ while [[ $# -gt 0 ]]; do
             echo "  --version, -v   Print version"
             echo "  --help, -h      Show this help message"
             echo ""
+            echo "Headless:"
+            echo "  --daemon             Supervise runners without a UI (events: runners/.logs/runnermaxxer.log)"
+            echo "  --stop-daemon        Stop a running daemon (runners keep running)"
+            echo "  --install-service    Run the daemon at login (launchd on macOS, systemd --user on Linux)"
+            echo "  --uninstall-service  Remove that service"
+            echo ""
+            echo "Scripting (no UI; exit status 0 = ok, 1 = failed, 2 = bad usage):"
+            echo "  --status [--json]    Projects and runners with their state"
+            echo "  --scale TARGET=N     Set a project's runner count (repeatable; TARGET as for --target)"
+            echo "  --drain ID           Remove runner ID once its current job finishes"
+            echo "  --stop ID            Stop runner ID (stays down until --start)"
+            echo "  --start ID           Start runner ID (clears quarantine)"
+            echo "  --remove ID          Unregister and delete runner ID now"
+            echo ""
             echo "Configuration:"
             echo "  Copy .runnermaxxer.conf.sample to .runnermaxxer.conf"
             echo "  Or run with --setup for interactive configuration"
@@ -2768,6 +3456,22 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+if [[ $STATUS_JSON -eq 1 && "$CLI_CMD" != "status" ]]; then
+    echo "Error: --json only goes with --status" >&2
+    exit 2
+fi
+if [[ -n "$CLI_CMD" ]]; then
+    [[ "$DAEMON_MODE" == "0" ]] || { echo "Error: --daemon can't be combined with --$CLI_CMD" >&2; exit 2; }
+    rc=0
+    run_cli || rc=$?
+    exit $rc
+fi
+
+if pid=$(daemon_pid); then
+    [[ "$DAEMON_MODE" == "1" ]] && die "a daemon is already running (pid $pid)"
+    die "$(daemon_running_msg "$pid")"
+fi
+
 echo -e "${BOLD}${CYAN}gh-runnermaxxer${NC}"
 echo -e "${DIM}GitHub Actions Self-Hosted Runner Manager${NC}"
 echo ""
@@ -2777,7 +3481,11 @@ load_config
 # Check if onboarding is needed
 needs_onboarding=false
 
-if [[ ! -f "$CONFIG_FILE" ]]; then
+if [[ "$DAEMON_MODE" == "1" ]]; then
+    # Headless: nobody to run the setup wizard
+    [[ -f "$CONFIG_FILE" ]] || die "No configuration found at $CONFIG_FILE - run --setup first"
+    validate_config || die "Invalid configuration in $CONFIG_FILE - fix it or run --setup"
+elif [[ ! -f "$CONFIG_FILE" ]]; then
     echo -e "${YELLOW}No configuration found.${NC}"
     if [[ -f "$SCRIPT_DIR/.runnermaxxer.conf.sample" ]]; then
         echo -e "${DIM}Tip: Copy .runnermaxxer.conf.sample to .runnermaxxer.conf${NC}"
@@ -2817,18 +3525,15 @@ check_tarball_freshness || true
 # Adopt/clean up state left behind by a previous manager instance
 reconcile_state
 
-# Guard against bad values busy-looping the UI or breaking arithmetic
-[[ "$REFRESH_INTERVAL" =~ ^[0-9]+$ && "$REFRESH_INTERVAL" -ge 1 ]] || REFRESH_INTERVAL=5
-[[ "$MAX_RESTART_ATTEMPTS" =~ ^[0-9]+$ && "$MAX_RESTART_ATTEMPTS" -ge 1 ]] || MAX_RESTART_ATTEMPTS=5
-[[ "$MAX_LOG_SIZE_MB" =~ ^[0-9]+$ && "$MAX_LOG_SIZE_MB" -ge 1 ]] || MAX_LOG_SIZE_MB=10
-[[ "$GH_HEALTH_TICKS" =~ ^[0-9]+$ ]] || GH_HEALTH_TICKS=12
-[[ "$MAX_RUNNERS" =~ ^[0-9]+$ && "$MAX_RUNNERS" -ge 1 ]] || MAX_RUNNERS=20
-[[ "$SHARED_TOOL_CACHE" =~ ^[01]$ ]] || SHARED_TOOL_CACHE=1
-[[ "$EPHEMERAL_RUNNERS" =~ ^[01]$ ]] || EPHEMERAL_RUNNERS=0
+sanitize_settings
 
 # Labels can't change while running; detect_labels shells out to
 # system_profiler etc., too slow to run every frame
 CACHED_LABELS=$(detect_labels)
+
+if [[ "$DAEMON_MODE" == "1" ]]; then
+    run_daemon     # loops until SIGTERM/SIGINT
+fi
 
 TUI_ACTIVE=1
 
@@ -2840,17 +3545,10 @@ fi
 
 clear
 tput cnorm 2>/dev/null || true
-tick=$((GH_HEALTH_TICKS - 1))   # first loop iteration polls GitHub
+SUPERVISOR_TICK=$((GH_HEALTH_TICKS - 1))   # first loop iteration polls GitHub
 M_SEL=0; M_MSG=""; M_URLS=(); M_WANT=()
 while true; do
-    supervise_runners || true
-    if [[ "$GH_HEALTH_TICKS" -gt 0 ]]; then
-        tick=$((tick + 1))
-        if [[ $tick -ge $GH_HEALTH_TICKS ]]; then
-            tick=0
-            check_github_health || true
-        fi
-    fi
+    supervisor_tick
     menu_reload
     draw_ui || true
     printf '  > '
@@ -2872,7 +3570,7 @@ while true; do
         r|R) restart_all || true ;;
         t|T|n|N) target_menu tui || true; M_URLS=(); M_WANT=() ;;
         l|L) view_logs || true ;;
-        c|C) check_github_status || true; tick=$((GH_HEALTH_TICKS - 1)) ;;  # re-poll next iteration
+        c|C) check_github_status || true; SUPERVISOR_TICK=$((GH_HEALTH_TICKS - 1)) ;;  # re-poll next iteration
         e|E) edit_config || true ;;
         q|Q) quit_prompt || true ;;
     esac
