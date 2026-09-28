@@ -3,7 +3,7 @@ package ui
 import (
 	"fmt"
 
-	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/state"
 )
 
 // PendingCounts tracks in-progress scale edits the way the bash TUI's

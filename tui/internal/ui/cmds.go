@@ -6,9 +6,9 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/sdawka/gh-runner-swarm/tui/internal/cli"
-	"github.com/sdawka/gh-runner-swarm/tui/internal/logtail"
-	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/cli"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/logtail"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/state"
 )
 
 // tickEvery drives the model's 1s clock.

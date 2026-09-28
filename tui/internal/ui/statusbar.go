@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/state"
 )
 
 // renderHeader is the status bar (Go design doc §3.1): script version,

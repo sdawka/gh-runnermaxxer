@@ -8,8 +8,8 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/sdawka/gh-runner-swarm/tui/internal/cli"
-	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/cli"
+	"github.com/sdawka/gh-runnermaxxer/tui/internal/state"
 )
 
 // runnerKey builds the Inflight/Confirm key for a single runner's op.

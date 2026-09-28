@@ -1,4 +1,4 @@
-module github.com/sdawka/gh-runner-swarm/tui
+module github.com/sdawka/gh-runnermaxxer/tui
 
 go 1.26.0
 
