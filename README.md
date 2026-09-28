@@ -12,7 +12,7 @@ A TUI for managing multiple GitHub Actions self-hosted runners on a single machi
   Status: 3 running / 4 configured
 
   myorg/myrepo
-    ● runner-1 PID 12345 [running: build-and-test]
+    ● runner-1 PID 12345 [running: build-and-test (12m)]
     ● runner-2 PID 12346 [idle]
   myorg/other-repo
     ● runner-3 PID 12347 [idle (last: Succeeded)]
@@ -46,7 +46,8 @@ One instance manages runners for any number of repositories and organizations. A
 - **Scale runners up/down** with a single keypress - scale-down prefers idle runners
 - **Drain mode** - scaling down never aborts a job: a busy runner is marked *draining* (shown in yellow), stops counting toward its project, and is deregistered and removed as soon as its current job finishes. Scaling back up cancels pending drains before setting up new runners
 - **Auto-detect labels** based on system capabilities (OS, arch, memory, GPU, Docker, WSL, etc.)
-- **Live status** showing what each runner is doing (idle, running job, errors, quarantined)
+- **Live status** showing what each runner is doing (idle, running job with elapsed time, errors, quarantined)
+- **Runner tarball freshness check** - at startup, warns (once, non-fatally) if the shipped tarball is older than the latest `actions/runner` release, so you know new runners are being extracted from a stale version; the latest-release lookup is cached for 24h
 - **Multiple projects in one instance** - run runners for several repositories and organizations side by side; each runner is registered to exactly one of them and the dashboard groups runners by project
 - **Project menu at startup** - arrow-key menu listing your projects from `.runnermaxxer.targets`: ↑/↓ picks a project, ←/→ sets its runner count; `a` adds a new repo/org on the spot; Enter applies by adding or removing runners per project
 - **Uses `gh` CLI** for authentication - no PAT management needed
@@ -72,7 +73,7 @@ Not supported: Windows (the Windows runner uses a different install flow), Alpin
 
 2. **Configure** - on first run, an interactive setup wizard asks for a runner name prefix and a global runner cap
 
-3. **Runner tarball** - if none is present, the script offers to download the latest release for your platform (checksum-verified). You can also fetch it explicitly with `./runnermaxxer.sh --download`, or download manually from [actions/runner releases](https://github.com/actions/runner/releases)
+3. **Runner tarball** - if none is present, the script offers to download the latest release for your platform (checksum-verified). You can also fetch it explicitly with `./runnermaxxer.sh --download`, or download manually from [actions/runner releases](https://github.com/actions/runner/releases). Once one is present, every startup checks (at most once per 24h) whether it's fallen behind the latest release and prints a one-line notice with the update command if so - new runners are always extracted from whatever tarball is on disk, so a stale one goes unnoticed otherwise
 
 4. **Pick projects and counts** - in the startup menu press `a` to add a repository or organization, use ↑/↓ to pick it and ←/→ to set how many runners it gets, then Enter to apply and open the dashboard
 
