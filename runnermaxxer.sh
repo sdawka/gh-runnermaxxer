@@ -15,7 +15,7 @@ fi
 
 set -euo pipefail
 
-VERSION="3.1.0-dev"
+VERSION="3.1.0"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/.runnermaxxer.conf"
@@ -36,6 +36,12 @@ SHARED_TOOL_CACHE="${SHARED_TOOL_CACHE:-1}"  # 1 = all runners share $RUNNER_BAS
 EPHEMERAL_RUNNERS="${EPHEMERAL_RUNNERS:-0}"  # 1 = register new runners with --ephemeral (one job each)
 AUTOSCALE="${AUTOSCALE:-0}"                  # 1 = scale projects with min=/max= bounds from GitHub's queue
 AUTOSCALE_IDLE_MINUTES="${AUTOSCALE_IDLE_MINUTES:-10}"  # idle this long before an autoscaled project shrinks by one
+
+# Keys a config file may set (everything else is ignored with a warning)
+CONFIG_KEYS="RUNNER_NAME_PREFIX MAX_RUNNERS REFRESH_INTERVAL MAX_RESTART_ATTEMPTS MAX_LOG_SIZE_MB GH_HEALTH_TICKS SHARED_TOOL_CACHE EPHEMERAL_RUNNERS AUTOSCALE AUTOSCALE_IDLE_MINUTES"
+# Notes about the configuration (ignored keys, clamped values), shown in the
+# state snapshot's warnings[]
+CONFIG_WARNINGS=()
 
 PID_DIR="$RUNNER_BASE_DIR/.pids"
 LOG_DIR="$RUNNER_BASE_DIR/.logs"
@@ -201,6 +207,15 @@ free_disk_mb() {
     mb=$(df -Pk "$RUNNER_BASE_DIR" 2>/dev/null | awk 'NR==2 {print int($4/1024)}' || true)
     [[ "$mb" =~ ^[0-9]+$ ]] || mb=999999
     echo "$mb"
+}
+
+# Percent of the filesystem holding $RUNNER_BASE_DIR that is free (empty
+# when df can't tell). df -Pk: column 2 = size, 4 = available, in KiB.
+disk_free_pct() {
+    local pct
+    pct=$(df -Pk "$RUNNER_BASE_DIR" 2>/dev/null | awk 'NR==2 && $2 > 0 {print int($4 * 100 / $2)}' || true)
+    [[ "$pct" =~ ^[0-9]+$ ]] && echo "$pct"
+    return 0
 }
 
 # Whether `date` understands GNU's `-d`. Probed once and cached so hot
@@ -888,9 +903,13 @@ pick_victims() {
 # runners are drained rather than killed. Prints progress; returns 1 if a
 # runner failed to set up or start.
 scale_target() {
-    local url=$1 want=$2 cur failed=0 id next_id label k
+    local url=$1 want=$2 cur failed=0 id next_id label k want_file
     label=$(target_label "$url")
     cur=$(count_runners_for_target "$url")
+    # The requested count, for the state snapshot while this runs and after
+    # a partial failure (want 5, have 3); dropped once the target gets there
+    want_file="$PID_DIR/want-$(target_key "$url").txt"
+    echo "$want" > "$want_file" 2>/dev/null || true
 
     # Cheapest way back up: cancel pending drains on this target first
     if [[ $want -gt $cur ]]; then
@@ -906,7 +925,7 @@ scale_target() {
     if [[ $want -gt $cur ]]; then
         if ! target_accessible "$url"; then
             echo -e "  ${RED}✗${NC} $label: $(gh_error_note "$GH_CLASS" "$GH_MSG")"
-            return 1
+            return 1   # want file kept: the snapshot shows want > have
         fi
         echo -e "  ${BLUE}$label: adding $((want - cur)) runner(s)...${NC}"
         for ((k = cur; k < want; k++)); do
@@ -932,6 +951,7 @@ scale_target() {
             remove_runner "$id"
         done
     fi
+    [[ $failed -eq 0 ]] && rm -f "$want_file"
     return $failed
 }
 
@@ -1966,7 +1986,7 @@ reconcile_state() {
         if is_running "$id"; then
             continue
         fi
-        real=$(runner_procs "$id" | head -1)
+        real=$(runner_main_pid "$id") || real=""
         if [[ -n "$real" ]]; then
             echo "$real" > "$PID_DIR/runner-$id.pid"
         else
@@ -2037,10 +2057,11 @@ log_runner_status() {
     case "$last" in
         *"Running job:"*)
             local job_name ts start_epoch now_epoch elapsed dur suffix
-            job_name=$(echo "$last" | sed 's/.*Running job: //' | cut -c1-25)
+            _parse_job_line "$last"
+            job_name=$(printf '%s' "$JOB_NAME" | cut -c1-25)
             suffix=""
-            ts=$(echo "$last" | sed -n 's/^\([0-9][0-9-]* [0-9:]*Z\):.*/\1/p')
-            if [[ -n "$ts" ]] && start_epoch=$(log_ts_to_epoch "$ts" 2>/dev/null); then
+            start_epoch=$JOB_START
+            if [[ -n "$start_epoch" ]]; then
                 now_epoch=$(date -u +%s 2>/dev/null || echo "")
                 if [[ "$now_epoch" =~ ^[0-9]+$ ]]; then
                     elapsed=$(( now_epoch - start_epoch ))
@@ -2062,6 +2083,33 @@ log_runner_status() {
     esac
 }
 
+# _parse_job_line LINE - from a "Running job:" log line, set JOB_NAME and
+# JOB_START (epoch, or empty when the timestamp can't be parsed)
+JOB_NAME=""; JOB_START=""
+_parse_job_line() {
+    local ts
+    JOB_NAME=$(printf '%s\n' "$1" | sed 's/.*Running job: //')
+    JOB_START=""
+    ts=$(printf '%s\n' "$1" | sed -n 's/^\([0-9][0-9-]* [0-9:]*Z\):.*/\1/p')
+    if [[ -n "$ts" ]]; then
+        JOB_START=$(log_ts_to_epoch "$ts" 2>/dev/null) || JOB_START=""
+    fi
+    return 0
+}
+
+# log_last_job ID - "name<TAB>start_epoch" of the job the runner is on,
+# per its log (same "last lifecycle line wins" rule as log_runner_status);
+# nothing when it is not running one
+log_last_job() {
+    local last
+    last=$(tail -50 "$LOG_DIR/runner-$1.log" 2>/dev/null \
+        | grep -E 'Running job:|Job .* completed with result|Listening for Jobs|Could not connect|Authentication failed|Starting Runner listener|Exiting runner' \
+        | tail -1) || last=""
+    [[ "$last" == *"Running job:"* ]] || return 0
+    _parse_job_line "$last"
+    printf '%s\t%s\n' "$JOB_NAME" "$JOB_START"
+}
+
 is_busy() {
     is_running "$1" || return 1
     # Either source saying busy counts. The GitHub flag can be up to a poll
@@ -2072,6 +2120,87 @@ is_busy() {
         return 0
     fi
     [[ "$(log_runner_status "$1")" == running:* ]]
+}
+
+# Why did the runner's run.sh exit? run.sh itself exits 0 after the listener
+# ends for good (terminated, session conflict, unknown code), so the exit
+# status says nothing; its run-helper logs the reason. Prints
+# "class<TAB>detail" when the newest relevant log line is an exit reason:
+#   conflict    another process holds this registration (exit 5)
+#   deprecated  runner too old for GitHub (exit 7)
+#   terminated  listener exited with 1
+#   unknown     unknown exit code (detail = the code)
+# A lifecycle line after it (the runner was relaunched and got going)
+# outranks it, as does a retry/update line (run.sh loops on those).
+runner_exit_reason() {
+    local last
+    last=$(tail -40 "$LOG_DIR/runner-$1.log" 2>/dev/null \
+        | grep -E 'Session Conflict|deprecated version exit code|exit with terminated error|unknown error code|retryable error|because of updating|Update finished|Listening for Jobs|Starting Runner listener|Running job:|completed with result' \
+        | tail -1) || last=""
+    case "$last" in
+        *"Session Conflict"*)              printf 'conflict\t\n' ;;
+        *"deprecated version exit code"*)  printf 'deprecated\t\n' ;;
+        *"exit with terminated error"*)    printf 'terminated\t\n' ;;
+        *"unknown error code"*)            printf 'unknown\t%s\n' "$(printf '%s' "${last##*code: }" | tr -cd '0-9')" ;;
+    esac
+    return 0
+}
+
+# lasterr text for a runner_exit_reason line
+runner_exit_note() {
+    case "${1%%$'\t'*}" in
+        conflict)   echo "session conflict: another process holds this runner's registration (cloned dir? second manager?) - remove and re-add" ;;
+        deprecated) echo "runner version too old for GitHub - run --download, then remove and re-add" ;;
+        terminated) echo "listener exited (terminated, exit 1) - see log" ;;
+        unknown)    echo "listener exited with code ${1#*$'\t'} - see log" ;;
+    esac
+}
+
+# The runner's version: from the bin -> bin.X.Y.Z symlink a self-updated
+# runner leaves behind (always current, no process start), else from
+# runner-N.version (written at setup), else by asking Runner.Listener once
+# (cached). Prints nothing when unknown.
+runner_version() {
+    local id=$1 dir="$RUNNER_BASE_DIR/runner-$1" t v
+    if [[ -L "$dir/bin" ]]; then
+        t=$(readlink "$dir/bin" 2>/dev/null) || t=""
+        t=${t%/}; t=${t##*/}
+        if [[ "$t" == bin.* && -n "${t#bin.}" ]]; then
+            echo "${t#bin.}"
+            return 0
+        fi
+    fi
+    v=$(cat "$PID_DIR/runner-$id.version" 2>/dev/null) || v=""
+    if [[ -z "$v" && -x "$dir/bin/Runner.Listener" ]]; then
+        v=$("$dir/bin/Runner.Listener" --version 2>/dev/null | head -1 | tr -d '[:space:]') || v=""
+        [[ "$v" =~ ^[0-9][0-9.]*$ ]] || v=""
+        [[ -n "$v" ]] && echo "$v" > "$PID_DIR/runner-$id.version" 2>/dev/null
+    fi
+    [[ -n "$v" ]] && echo "$v"
+    return 0
+}
+
+# PID to record for a runner's live process family: the root of the tree
+# (a process whose parent is not itself a runner process), preferring
+# run.sh. The first pgrep match can be Runner.Listener, whose PID changes
+# on every self-update.
+runner_main_pid() {
+    local pids p pp cmd best=""
+    pids=$(runner_procs "$1" | tr '\n' ' ')
+    pids=${pids% }
+    [[ -n "$pids" ]] || return 1
+    for p in $pids; do
+        pp=$(ps -p "$p" -o ppid= 2>/dev/null | tr -d ' ') || pp=""
+        case " $pids " in *" $pp "*) continue ;; esac
+        cmd=$(ps -p "$p" -o command= 2>/dev/null) || cmd=""
+        if [[ "$cmd" == *run.sh* ]]; then
+            echo "$p"
+            return 0
+        fi
+        [[ -n "$best" ]] || best=$p
+    done
+    [[ -n "$best" ]] || best=${pids%% *}
+    echo "$best"
 }
 
 # ============================================================================
@@ -2144,6 +2273,19 @@ supervise_runners() {
             continue
         fi
 
+        # The run-helper logged why the listener stopped. A session conflict
+        # or a deprecated version won't fix itself by restarting: quarantine
+        # at once with the real reason instead of after five crash rounds.
+        local reason
+        reason=$(runner_exit_reason "$id")
+        case "${reason%%$'\t'*}" in
+            conflict|deprecated)
+                touch "$PID_DIR/runner-$id.quarantined"
+                set_lasterr "$id" "$(runner_exit_note "$reason") - quarantined"
+                continue
+                ;;
+        esac
+
         local fails last delay
         fails=$(cat "$PID_DIR/runner-$id.failcount" 2>/dev/null || echo 0)
         [[ "$fails" =~ ^[0-9]+$ ]] || fails=0
@@ -2163,6 +2305,8 @@ supervise_runners() {
         # (>=60s above) clears it. start_runner returning 0 after surviving
         # one second says nothing about a runner that crashes at t+2s.
         echo $((fails + 1)) > "$PID_DIR/runner-$id.failcount"
+        # Terminated / unknown exit code: worth a retry, but say why it died
+        [[ -n "$reason" ]] && set_lasterr "$id" "$(runner_exit_note "$reason")"
         dlog "runner-$id: not running - restart attempt $((fails + 1))"
         start_runner "$id" >/dev/null 2>&1 || true
     done
@@ -2570,6 +2714,10 @@ runner_env() {
         # toolkit's tool-cache reads RUNNER_TOOL_CACHE. Set both common ones.
         export RUNNER_TOOL_CACHE="$cache" AGENT_TOOLSDIRECTORY="$cache"
     fi
+    # Without this, run.sh reports a deprecated-version exit like any other;
+    # with it, run-helper logs "deprecated version exit code" and
+    # runner_exit_reason can say so
+    export ACTIONS_RUNNER_RETURN_VERSION_DEPRECATED_EXIT_CODE=1
     return 0
 }
 
@@ -2588,7 +2736,7 @@ start_runner() {
     # Adopt a live orphan (e.g. after a manager restart) instead of
     # starting a duplicate that would fight over the registration.
     local orphan
-    orphan=$(runner_procs "$id" | head -1)
+    orphan=$(runner_main_pid "$id") || orphan=""
     if [[ -n "$orphan" ]]; then
         echo "$orphan" > "$pid_file"
         dlog "runner-$id: adopted running process $orphan"
@@ -3166,6 +3314,8 @@ supervisor_tick() {
             check_github_health || true
         fi
     fi
+    # state.json for the Go TUI and --status --json (never calls gh)
+    if [[ "$DAEMON_MODE" == "1" ]]; then write_state_snapshot daemon; else write_state_snapshot tui; fi
     return 0
 }
 
@@ -3531,9 +3681,14 @@ json_num() {
 # Snapshot every project and runner into parallel arrays (P_* / R_*), so
 # the text and JSON renderers show the same data from one pass.
 status_collect() {
-    local t id st n conf run busy drain ids
+    local t id st n conf run busy drain ids now fails last job b e key q
+    now=$(date +%s)
     P_URLS=(); P_LISTED=(); P_CONF=(); P_RUN=(); P_BUSY=(); P_DRAIN=()
+    P_TYPE=(); P_WANT=(); P_MIN=(); P_MAX=(); P_QUEUED=(); P_UNSAT=()
+    P_ERRC=(); P_ERRM=(); P_ERRS=()
     R_IDS=(); R_PROJ=(); R_STATE=(); R_PID=(); R_STATUS=(); R_ERR=(); R_EPH=()
+    R_NAME=(); R_JOB=(); R_JOBSTART=(); R_VER=(); R_FAILS=(); R_NEXT=()
+    R_WORKMB=(); R_DRAIN=(); R_QUAR=()
     for t in $(known_targets) ""; do
         if [[ -n "$t" ]]; then ids=$(runner_ids_for_target "$t"); else ids=$(unassigned_runner_ids); fi
         conf=0; run=0; busy=0; drain=0
@@ -3541,14 +3696,31 @@ status_collect() {
             st=$(runner_state "$id")
             n=${#R_IDS[@]}
             R_IDS[n]=$id; R_PROJ[n]=$t; R_STATE[n]=$st
-            R_PID[n]=""; R_STATUS[n]=""
+            R_PID[n]=""; R_STATUS[n]=""; R_JOB[n]=""; R_JOBSTART[n]=""
             if is_running "$id"; then
                 R_PID[n]=$(cat "$PID_DIR/runner-$id.pid" 2>/dev/null || echo "")
                 R_STATUS[n]=$(get_runner_status "$id")
+                job=$(log_last_job "$id")
+                if [[ -n "$job" ]]; then
+                    R_JOB[n]=${job%%$'\t'*}; R_JOBSTART[n]=${job#*$'\t'}
+                fi
             fi
             R_ERR[n]=$(get_lasterr "$id")
             R_EPH[n]=false
             is_ephemeral "$id" && R_EPH[n]=true
+            R_DRAIN[n]=false; is_draining "$id" && R_DRAIN[n]=true
+            R_QUAR[n]=false; is_quarantined "$id" && R_QUAR[n]=true
+            R_NAME[n]=$(registered_name "$id")
+            R_VER[n]=$(runner_version "$id")
+            R_WORKMB[n]=$(cat "$PID_DIR/runner-$id.workmb" 2>/dev/null) || R_WORKMB[n]=""
+            fails=$(cat "$PID_DIR/runner-$id.failcount" 2>/dev/null) || fails=""
+            [[ "$fails" =~ ^[0-9]+$ ]] || fails=0
+            R_FAILS[n]=$fails
+            R_NEXT[n]=""
+            if [[ "$st" == "restarting" ]]; then
+                last=$(cat "$PID_DIR/runner-$id.laststart" 2>/dev/null) || last=""
+                [[ "$last" =~ ^[0-9]+$ ]] && R_NEXT[n]=$(( last + 5 * (2 ** fails) ))
+            fi
             case "$st" in
                 draining) drain=$((drain + 1)) ;;
                 busy) busy=$((busy + 1)); run=$((run + 1)); conf=$((conf + 1)) ;;
@@ -3561,34 +3733,184 @@ status_collect() {
         P_URLS[n]=$t; P_CONF[n]=$conf; P_RUN[n]=$run; P_BUSY[n]=$busy; P_DRAIN[n]=$drain
         P_LISTED[n]=false
         target_in_file "$t" && P_LISTED[n]=true
+        P_TYPE[n]=$(target_type "$t")
+        key=$(target_key "$t")
+        P_WANT[n]=$(cat "$PID_DIR/want-$key.txt" 2>/dev/null) || P_WANT[n]=""
+        [[ "${P_WANT[n]}" =~ ^[0-9]+$ ]] || P_WANT[n]=$conf
+        b=$(target_bounds "$t")
+        P_MIN[n]=""; P_MAX[n]=""
+        [[ -n "$b" ]] && { P_MIN[n]=${b% *}; P_MAX[n]=${b#* }; }
+        P_QUEUED[n]=$(cached_queue_depth "$t")
+        q=$(cut -s -f2 "$PID_DIR/queue-$key.txt" 2>/dev/null) || q=""
+        [[ "$q" =~ ^[0-9]+$ ]] || q=""
+        P_UNSAT[n]=$q
+        P_ERRC[n]=""; P_ERRM[n]=""; P_ERRS[n]=""
+        e=$(cat "$(target_err_file "$t")" 2>/dev/null) || e=""
+        if [[ -n "$e" ]]; then
+            P_ERRC[n]=$(printf '%s\n' "$e" | cut -f1)
+            P_ERRM[n]=$(printf '%s\n' "$e" | cut -f2)
+            P_ERRS[n]=$(printf '%s\n' "$e" | cut -f3)
+        fi
     done
+    STATUS_NOW=$now
     return 0
 }
 
-status_json() {
-    local i dpid ts sep=""
-    dpid=$(daemon_pid || true)
-    ts=$(cat "$PID_DIR/gh-poll.ts" 2>/dev/null || true)
-    printf '{"version":%s,"daemon_pid":%s,"max_runners":%s,"github_polled_at":%s,"projects":[' \
-        "$(json_str "$VERSION")" "$(json_num "$dpid")" "$(json_num "$MAX_RUNNERS")" "$(json_num "$ts")"
-    for ((i = 0; i < ${#P_URLS[@]}; i++)); do
-        printf '%s{"url":%s,"label":%s,"listed":%s,"configured":%s,"running":%s,"busy":%s,"draining":%s}' \
-            "$sep" "$(json_str "${P_URLS[i]}")" "$(json_str "$(target_label "${P_URLS[i]}")")" \
-            "${P_LISTED[i]}" "${P_CONF[i]}" "${P_RUN[i]}" "${P_BUSY[i]}" "${P_DRAIN[i]}"
+json_bool() { if [[ "$1" == "true" || "$1" == "1" ]]; then printf 'true'; else printf 'false'; fi; }
+
+# JSON string, or null when empty
+json_str_null() { if [[ -n "$1" ]]; then json_str "$1"; else printf 'null'; fi; }
+
+# JSON array of strings from a comma-separated list
+json_str_list() {
+    local item sep="" rest=$1
+    printf '['
+    while [[ -n "$rest" ]]; do
+        item=${rest%%,*}
+        if [[ "$rest" == *,* ]]; then rest=${rest#*,}; else rest=""; fi
+        [[ -n "$item" ]] || continue
+        printf '%s%s' "$sep" "$(json_str "$item")"
         sep=","
     done
+    printf ']'
+}
+
+# state_json WRITER - the schema 2 state document (see docs / the Go TUI's
+# internal/state), from the arrays status_collect filled. Reads files only:
+# it never calls gh, so the daemon can write it every tick.
+state_json() {
+    local writer=${1:-cli} i sep dpid now k v tar tarver latest stale free pct
+    local gst gmsg rate rrem="" rres="" host el w
+    now=${STATUS_NOW:-$(date +%s)}
+    if [[ "$DAEMON_MODE" == "1" ]]; then dpid=$$; else dpid=$(daemon_pid || true); fi
+    tar=${RUNNER_TAR:-}
+    [[ -n "$tar" ]] || tar=$(detect_runner_tarball 2>/dev/null || true)
+    tarver=$(tarball_version "$tar")
+    latest=$(cached_latest_runner_tag || true); latest=${latest#v}
+    stale=false
+    [[ -n "$tarver" && -n "$latest" && "$tarver" != "$latest" ]] && stale=true
+    free=$(free_disk_mb); pct=$(disk_free_pct)
+    gst=$(gh_state)
+    if [[ -f "$PID_DIR/gh.err" ]]; then
+        gmsg=$(cut -f3 "$PID_DIR/gh.err" 2>/dev/null) || gmsg=""
+    else
+        gmsg=$(cat "$PID_DIR/gh.msg" 2>/dev/null) || gmsg=""
+    fi
+    rate=$(cat "$PID_DIR/gh.rate" 2>/dev/null) || rate=""
+    if [[ -n "$rate" ]]; then
+        rrem=$(printf '%s\n' "$rate" | cut -f1); rres=$(printf '%s\n' "$rate" | cut -f2)
+    fi
+    host=$(cat "$PID_DIR/gh.host" 2>/dev/null) || host=""
+    [[ -n "$host" ]] || host=${GH_HOST:-github.com}
+
+    printf '{"schema":2,"version":%s,"writer":%s,"daemon_pid":%s,"tick_ts":%s,"refresh_interval":%s,"max_runners":%s,' \
+        "$(json_str "$VERSION")" "$(json_str "$writer")" "$(json_num "$dpid")" "$now" \
+        "$(json_num "$REFRESH_INTERVAL")" "$(json_num "$MAX_RUNNERS")"
+    printf '"gh":{"user":%s,"host":%s,"scopes":%s,"state":%s,"message":%s,"checked":%s,"rate_remaining":%s,"rate_reset":%s,"polled_at":%s},' \
+        "$(json_str_null "$(cat "$PID_DIR/gh.user" 2>/dev/null || true)")" "$(json_str "$host")" \
+        "$(json_str_list "$(cat "$PID_DIR/gh.scopes" 2>/dev/null || true)")" \
+        "$(json_str "$gst")" "$(json_str_null "$gmsg")" \
+        "$(json_num "$(cat "$PID_DIR/gh.checked" 2>/dev/null || true)")" \
+        "$(json_num "$rrem")" "$(json_num "$rres")" \
+        "$(json_num "$(cat "$PID_DIR/gh-poll.ts" 2>/dev/null || true)")"
+    printf '"tarball":{"version":%s,"latest":%s,"stale":%s},' \
+        "$(json_str_null "$tarver")" "$(json_str_null "$latest")" "$stale"
+    printf '"disk":{"free_mb":%s,"pct_free":%s},' "$(json_num "$free")" "$(json_num "$pct")"
+
+    printf '"config":{'
+    sep=""
+    for k in $CONFIG_KEYS; do
+        eval "v=\${$k:-}"
+        if [[ "$k" == "RUNNER_NAME_PREFIX" ]]; then
+            printf '%s"%s":%s' "$sep" "$k" "$(json_str "$v")"
+        else
+            printf '%s"%s":%s' "$sep" "$k" "$(json_num "$v")"
+        fi
+        sep=","
+    done
+    printf '},"warnings":['
+    sep=""
+    for w in ${CONFIG_WARNINGS[@]+"${CONFIG_WARNINGS[@]}"} ${STATE_WARNINGS[@]+"${STATE_WARNINGS[@]}"}; do
+        printf '%s%s' "$sep" "$(json_str "$w")"
+        sep=","
+    done
+
+    printf '],"targets":['
+    sep=""
+    for ((i = 0; i < ${#P_URLS[@]}; i++)); do
+        printf '%s{"url":%s,"label":%s,"type":%s,"listed":%s,"want":%s,"have":%s,"running":%s,"busy":%s,"draining":%s,' \
+            "$sep" "$(json_str "${P_URLS[i]}")" "$(json_str "$(target_label "${P_URLS[i]}")")" \
+            "$(json_str "${P_TYPE[i]}")" "${P_LISTED[i]}" "${P_WANT[i]}" "${P_CONF[i]}" \
+            "${P_RUN[i]}" "${P_BUSY[i]}" "${P_DRAIN[i]}"
+        printf '"min":%s,"max":%s,"autoscale":%s,"queued":%s,"unsatisfiable":%s,"error":' \
+            "$(json_num "${P_MIN[i]}")" "$(json_num "${P_MAX[i]}")" \
+            "$([[ "$AUTOSCALE" == "1" && -n "${P_MIN[i]}" ]] && echo true || echo false)" \
+            "$(json_num "${P_QUEUED[i]}")" "$(json_num "${P_UNSAT[i]}")"
+        if [[ -n "${P_ERRC[i]}" ]]; then
+            printf '{"class":%s,"message":%s,"since":%s}}' "$(json_str "${P_ERRC[i]}")" \
+                "$(json_str "$(gh_error_note "${P_ERRC[i]}" "${P_ERRM[i]}")")" "$(json_num "${P_ERRS[i]}")"
+        else
+            printf 'null}'
+        fi
+        sep=","
+    done
+
     printf '],"runners":['
     sep=""
     for ((i = 0; i < ${#R_IDS[@]}; i++)); do
-        printf '%s{"id":%s,"project":%s,"state":%s,"pid":%s,"status":%s,"ephemeral":%s,"last_error":%s}' \
-            "$sep" "${R_IDS[i]}" \
-            "$([[ -n "${R_PROJ[i]}" ]] && json_str "${R_PROJ[i]}" || printf 'null')" \
-            "$(json_str "${R_STATE[i]}")" "$(json_num "${R_PID[i]}")" \
-            "$(json_str "${R_STATUS[i]}")" "${R_EPH[i]}" \
-            "$([[ -n "${R_ERR[i]}" ]] && json_str "${R_ERR[i]}" || printf 'null')"
+        el=""
+        [[ "${R_JOBSTART[i]}" =~ ^[0-9]+$ ]] && { el=$(( now - R_JOBSTART[i] )); [[ $el -ge 0 ]] || el=0; }
+        printf '%s{"id":%s,"name":%s,"target":%s,"pid":%s,"state":%s,"status":%s,"job":%s,"job_started":%s,"elapsed":%s,"version":%s,' \
+            "$sep" "${R_IDS[i]}" "$(json_str "${R_NAME[i]}")" "$(json_str_null "${R_PROJ[i]}")" \
+            "$(json_num "${R_PID[i]}")" "$(json_str "${R_STATE[i]}")" "$(json_str "${R_STATUS[i]}")" \
+            "$(json_str_null "${R_JOB[i]}")" "$(json_num "${R_JOBSTART[i]}")" "$(json_num "$el")" \
+            "$(json_str_null "${R_VER[i]}")"
+        printf '"ephemeral":%s,"draining":%s,"quarantined":%s,"fails":%s,"next_retry":%s,"lasterr":%s,"log_path":%s,"work_mb":%s}' \
+            "${R_EPH[i]}" "${R_DRAIN[i]}" "${R_QUAR[i]}" "${R_FAILS[i]}" "$(json_num "${R_NEXT[i]}")" \
+            "$(json_str_null "${R_ERR[i]}")" "$(json_str "$LOG_DIR/runner-${R_IDS[i]}.log")" \
+            "$(json_num "${R_WORKMB[i]}")"
         sep=","
     done
     printf ']}\n'
+}
+
+# Warnings about the host, recomputed per snapshot
+STATE_WARNINGS=()
+state_warnings() {
+    STATE_WARNINGS=()
+    if [[ -s "$ORPHANS_FILE" ]]; then
+        STATE_WARNINGS[${#STATE_WARNINGS[@]}]="orphaned GitHub registrations need manual cleanup (see $(basename "$ORPHANS_FILE"))"
+    fi
+    return 0
+}
+
+# write_state_snapshot WRITER - collect and atomically replace
+# $PID_DIR/state.json (tmp + mv in the same directory). The temp name has
+# the pid in it so the daemon and a CLI process never share one.
+write_state_snapshot() {
+    local tmp="$PID_DIR/state.json.tmp.$$"
+    mkdir -p "$PID_DIR" 2>/dev/null || return 0
+    status_collect || return 0
+    state_warnings
+    if state_json "${1:-cli}" > "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$PID_DIR/state.json"
+    else
+        rm -f "$tmp"
+    fi
+    return 0
+}
+
+# --status --json: the snapshot file when it is fresh (younger than two
+# ticks, written by a daemon/TUI or by the last CLI command), else nothing
+# (returns 1) and the caller collects live
+status_json_cached() {
+    local f="$PID_DIR/state.json" ts now
+    [[ -f "$f" ]] || return 1
+    ts=$(sed -n 's/.*"tick_ts":\([0-9][0-9]*\).*/\1/p' "$f" 2>/dev/null | head -1) || ts=""
+    [[ "$ts" =~ ^[0-9]+$ ]] || return 1
+    now=$(date +%s)
+    [[ $(( now - ts )) -lt $(( 2 * REFRESH_INTERVAL )) ]] || return 1
+    cat "$f"
 }
 
 status_text() {
@@ -3739,8 +4061,12 @@ run_cli() {
     sanitize_settings
     case "$CLI_CMD" in
         status)
-            status_collect
-            if [[ $STATUS_JSON -eq 1 ]]; then status_json; else status_text; fi
+            if [[ $STATUS_JSON -eq 1 ]]; then
+                status_json_cached || { status_collect; state_warnings; state_json cli; }
+            else
+                status_collect
+                status_text
+            fi
             ;;
         stop-daemon)       cli_stop_daemon || rc=$? ;;
         install-service)   install_service || rc=$? ;;
@@ -3755,6 +4081,8 @@ run_cli() {
             else
                 cli_runner_cmd "$CLI_CMD" "$CLI_RUNNER" || rc=$?
             fi
+            # No daemon will refresh state.json after this change: do it here
+            [[ $CLI_SUPERVISED -eq 0 ]] && write_state_snapshot cli
             if [[ $CLI_SUPERVISED -eq 0 && "$CLI_CMD" != "stop" && $rc -ne 2 ]]; then
                 echo -e "${DIM}Note: no daemon is running, so runners are not supervised (no auto-restart, drains not finished) - start one with --daemon or --install-service${NC}" >&2
             fi

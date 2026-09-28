@@ -80,16 +80,16 @@ t_eq "1 2 3 4" "${R_IDS[*]}" "status_collect runner ids"
 t_eq "stopped quarantined running restarting" "${R_STATE[*]}" "status_collect runner states"
 t_eq "" "${R_PROJ[3]}" "status_collect unassigned runner has no project"
 
-json=$(status_json)
+json=$(state_json cli)
 if command -v python3 >/dev/null 2>&1; then
     parsed=$(printf '%s' "$json" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 r = {x["id"]: x for x in d["runners"]}
-print(len(d["projects"]), d["projects"][0]["label"], d["projects"][1]["listed"],
-      r[2]["last_error"].replace("\n", "|"), r[3]["pid"], r[4]["project"], d["daemon_pid"])
+print(d["schema"], d["writer"], len(d["targets"]), d["targets"][0]["label"], d["targets"][1]["listed"],
+      r[2]["lasterr"].replace("\n", "|"), r[3]["pid"], r[4]["target"], d["daemon_pid"], r[2]["quarantined"])
 ' 2>&1)
-    t_eq 'x2 a/b False crash-looped "5x"|quarantined 4242 None None' "x$parsed" "status_json is valid JSON with expected fields"
+    t_eq 'x2 cli 2 a/b False crash-looped "5x"|quarantined 4242 None None True' "x$parsed" "state_json is valid JSON with expected fields"
 else
     echo "  (python3 not found - skipping JSON parse check)"
 fi
@@ -121,6 +121,13 @@ t_eq "4 2" "$SUP $GHC" "supervisor_tick: polls every GH_HEALTH_TICKS"
 GH_HEALTH_TICKS=0
 supervisor_tick
 t_eq "5 2" "$SUP $GHC" "supervisor_tick: GH_HEALTH_TICKS=0 never polls"
+t_ok "supervisor_tick writes state.json" test -s "$PID_DIR/state.json"
+t_ok "a TUI tick is written as writer tui" grep -q '"writer":"tui"' "$PID_DIR/state.json"
+DAEMON_MODE=1
+supervisor_tick
+t_ok "a daemon tick is written as writer daemon" grep -q '"writer":"daemon","daemon_pid":'"$$" "$PID_DIR/state.json"
+DAEMON_MODE=0
+t_eq "" "$(ls -A "$PID_DIR" | grep 'state.json.tmp' || true)" "no temp file left behind"
 reload_lib
 
 # --- dlog -------------------------------------------------------------------

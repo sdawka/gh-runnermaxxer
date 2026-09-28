@@ -82,3 +82,9 @@ t_fail_ok "ephemeral_job_finished is false when the re-register marker is the ne
     t_eq "" "${RUNNER_TOOL_CACHE:-}" "runner_env does not export RUNNER_TOOL_CACHE when SHARED_TOOL_CACHE=0"
     t_eq "" "${AGENT_TOOLSDIRECTORY:-}" "runner_env does not export AGENT_TOOLSDIRECTORY when SHARED_TOOL_CACHE=0"
 )
+
+(
+    unset ACTIONS_RUNNER_RETURN_VERSION_DEPRECATED_EXIT_CODE 2>/dev/null || true
+    runner_env
+    t_eq "1" "${ACTIONS_RUNNER_RETURN_VERSION_DEPRECATED_EXIT_CODE:-}" "runner_env asks the listener to report a deprecated version (exit 7)"
+)
