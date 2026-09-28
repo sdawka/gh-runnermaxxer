@@ -63,9 +63,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// that requested them returns.
 		return m, pollCLI(m.ctx, m.Client)
 
+	case logTailStartedMsg:
+		if m.Log == nil || m.Log.RunnerID != msg.id {
+			return m, nil // stale: the pane was switched or closed before this arrived
+		}
+		m.logUpdates = msg.updates
+		m.Log.setLines(msg.lines)
+		return m, listenLogUpdates(msg.id, msg.updates)
+
+	case logLinesMsg:
+		if m.Log == nil || m.Log.RunnerID != msg.id {
+			return m, nil
+		}
+		if msg.reset {
+			m.Log.setLines(msg.lines)
+		} else {
+			m.Log.appendLines(msg.lines)
+		}
+		return m, listenLogUpdates(msg.id, m.logUpdates)
+
+	case logErrMsg:
+		if m.Log != nil && m.Log.RunnerID == msg.id {
+			m.Log.Err = msg.err
+		}
+		return m, nil
+
 	case tea.KeyPressMsg:
 		if m.Confirm != nil {
 			return m.handleConfirmKey(msg)
+		}
+		if m.Log != nil {
+			if handled, updated, cmd := m.handleLogKey(msg); handled {
+				return updated, cmd
+			}
 		}
 		return m.handleKey(msg)
 	}
@@ -200,12 +230,29 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionFilter:
 		m.Filtering = !m.Filtering
 		return m, nil
+
+	case ActionLogs:
+		id, ok := m.currentRunnerID()
+		if !ok {
+			m.notice("select a runner", LevelWarn)
+			return m, nil
+		}
+		if m.Log != nil && m.Log.RunnerID == id {
+			return m.closeLog(), nil
+		}
+		r, _ := m.Snap.RunnerByID(id)
+		return m.openRunnerLog(id, r.Name, r.LogPath)
+
+	case ActionDaemonLog:
+		if m.Log != nil && m.Log.RunnerID == daemonLogID {
+			return m.closeLog(), nil
+		}
+		return m.openDaemonLog()
 	}
 
-	// ActionProjects, ActionAddTarget, ActionLogs, ActionDaemonLog,
-	// ActionCheckGH, ActionConfig, ActionDownload, ActionBounds and
-	// ActionRemoveFromList are handled once the screens/exec wiring that
-	// give them meaning land (commits 10-11).
+	// ActionProjects, ActionAddTarget, ActionCheckGH, ActionConfig,
+	// ActionDownload, ActionBounds and ActionRemoveFromList are handled once
+	// the screens/exec wiring that give them meaning land (commit 11).
 	return m, nil
 }
 

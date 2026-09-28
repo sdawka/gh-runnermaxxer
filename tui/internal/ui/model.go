@@ -9,7 +9,15 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/sdawka/gh-runner-swarm/tui/internal/cli"
+	"github.com/sdawka/gh-runner-swarm/tui/internal/logtail"
 	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
+)
+
+// noLogOpen and daemonLogID are the two Model.Log sentinel ids; any other
+// value is a runner id.
+const (
+	noLogOpen   = -1
+	daemonLogID = -2
 )
 
 // Screen identifies which top-level view is active. Only ScreenDashboard
@@ -82,9 +90,15 @@ type Model struct {
 	Confirm *ConfirmModel
 
 	Width, Height int
-	ShowLog       bool
+	ShowLog       bool // wide enough for a permanent side log pane, if one is open
 	Compact       bool
-	DetailID      int
+
+	// Log is the currently open log view (a runner's, or the daemon's when
+	// its id is daemonLogID), rendered as a side pane when ShowLog is true
+	// or full-screen otherwise (§3.4). nil means no log view is open.
+	Log        *LogPane
+	logCancel  context.CancelFunc
+	logUpdates <-chan logtail.Update
 }
 
 // New builds the initial Model. w may be nil when there is no state.json to
@@ -108,7 +122,6 @@ func New(ctx context.Context, client cli.Client, paths cli.Paths, w *state.Watch
 		Spinner:       spinner.New(),
 		Now:           time.Now(),
 		Screen:        ScreenDashboard,
-		DetailID:      -1,
 	}
 }
 

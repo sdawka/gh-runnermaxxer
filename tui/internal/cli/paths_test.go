@@ -24,6 +24,9 @@ func TestNewPathsDefault(t *testing.T) {
 	if p.DaemonPID != filepath.Join(p.RunnerBase, ".daemon.pid") {
 		t.Errorf("DaemonPID = %q", p.DaemonPID)
 	}
+	if p.DaemonLog != filepath.Join(p.LogDir, "runnermaxxer.log") {
+		t.Errorf("DaemonLog = %q", p.DaemonLog)
+	}
 }
 
 func TestNewPathsRunnerBaseOverride(t *testing.T) {

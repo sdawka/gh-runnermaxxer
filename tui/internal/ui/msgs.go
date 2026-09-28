@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/sdawka/gh-runner-swarm/tui/internal/cli"
+	"github.com/sdawka/gh-runner-swarm/tui/internal/logtail"
 	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
 )
 
@@ -42,6 +43,14 @@ type applyResultMsg struct {
 	keys []string
 	op   Op
 	res  cli.Result
+}
+
+// logTailStartedMsg reports the initial lines and follow channel from a
+// freshly started logtail.Tail for id (a runner id, or daemonLogID).
+type logTailStartedMsg struct {
+	id      int
+	lines   []string
+	updates <-chan logtail.Update
 }
 
 // logLinesMsg carries new lines for the log pane/viewer. reset is true

@@ -15,6 +15,7 @@ type Paths struct {
 	LogDir     string // RunnerBase/.logs
 	StateFile  string // PIDDir/state.json
 	DaemonPID  string // RunnerBase/.daemon.pid
+	DaemonLog  string // LogDir/runnermaxxer.log (runnermaxxer.sh:46 DAEMON_LOG)
 }
 
 // NewPaths derives Paths from the location of runnermaxxer.sh, honouring
@@ -26,12 +27,14 @@ func NewPaths(scriptPath string) Paths {
 		runnerBase = filepath.Join(scriptDir, "runners")
 	}
 	pidDir := filepath.Join(runnerBase, ".pids")
+	logDir := filepath.Join(runnerBase, ".logs")
 	return Paths{
 		ScriptDir:  scriptDir,
 		RunnerBase: runnerBase,
 		PIDDir:     pidDir,
-		LogDir:     filepath.Join(runnerBase, ".logs"),
+		LogDir:     logDir,
 		StateFile:  filepath.Join(pidDir, "state.json"),
 		DaemonPID:  filepath.Join(runnerBase, ".daemon.pid"),
+		DaemonLog:  filepath.Join(logDir, "runnermaxxer.log"),
 	}
 }

@@ -7,6 +7,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/sdawka/gh-runner-swarm/tui/internal/cli"
+	"github.com/sdawka/gh-runner-swarm/tui/internal/logtail"
 	"github.com/sdawka/gh-runner-swarm/tui/internal/state"
 )
 
@@ -80,5 +81,38 @@ func applyVerb(ctx context.Context, keys []string, op Op, exec func(context.Cont
 	return func() tea.Msg {
 		res := exec(ctx)
 		return applyResultMsg{keys: keys, op: op, res: res}
+	}
+}
+
+// startLogTail opens a logtail.Tail on path and reports its initial lines
+// plus the update channel to keep following it. ctx should be a
+// child context the caller can cancel independently (switching runners, or
+// closing the pane) without tearing down the rest of the program.
+func startLogTail(ctx context.Context, id int, path string) tea.Cmd {
+	return func() tea.Msg {
+		lines, updates, err := logtail.Tail(ctx, path, logRingLimit)
+		if err != nil {
+			return logErrMsg{id: id, err: err}
+		}
+		return logTailStartedMsg{id: id, lines: lines, updates: updates}
+	}
+}
+
+// listenLogUpdates reads the next Update off a logtail channel and wraps it
+// as a tea.Msg; Update re-issues this after each message to keep listening,
+// exactly like watchSnapshot does for the state.Watcher channel.
+func listenLogUpdates(id int, updates <-chan logtail.Update) tea.Cmd {
+	if updates == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		upd, ok := <-updates
+		if !ok {
+			return nil
+		}
+		if upd.Err != nil {
+			return logErrMsg{id: id, err: upd.Err}
+		}
+		return logLinesMsg{id: id, lines: upd.Lines, reset: upd.Reset}
 	}
 }
