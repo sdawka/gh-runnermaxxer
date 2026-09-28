@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2218  # real function is used first, then stubbed later on purpose
 # gh_auth_probe: user, scopes, and per-target permission
 source "$(dirname "$0")/_helper.sh"
 mkdir -p "$PID_DIR"

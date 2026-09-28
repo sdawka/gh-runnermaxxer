@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2218  # real function is used first, then stubbed later on purpose
 # Config parser (no `source`), validation, clamping, save round trip, reload
 source "$(dirname "$0")/_helper.sh"
 mkdir -p "$PID_DIR" "$LOG_DIR"
