@@ -1,0 +1,139 @@
+{
+  "schema": 2,
+  "version": "3.1.0",
+  "writer": "daemon",
+  "daemon_pid": 41213,
+  "tick_ts": 1790612448,
+  "refresh_interval": 5,
+  "max_runners": 20,
+  "gh": {
+    "user": "sahil",
+    "host": "github.com",
+    "scopes": ["repo", "admin:org"],
+    "state": "ok",
+    "message": null,
+    "checked": 1790612000,
+    "rate_remaining": 4812,
+    "rate_reset": 1790616000,
+    "polled_at": 1790612440
+  },
+  "tarball": { "version": "2.334.0", "latest": "2.337.0", "stale": true },
+  "disk": { "free_mb": 41234, "pct_free": 41 },
+  "config": {
+    "RUNNER_NAME_PREFIX": "mac",
+    "MAX_RUNNERS": 20,
+    "REFRESH_INTERVAL": 5,
+    "MAX_RESTART_ATTEMPTS": 5,
+    "MAX_LOG_SIZE_MB": 10,
+    "GH_HEALTH_TICKS": 12,
+    "SHARED_TOOL_CACHE": true,
+    "EPHEMERAL_RUNNERS": false,
+    "AUTOSCALE": true,
+    "AUTOSCALE_IDLE_MINUTES": 15
+  },
+  "warnings": ["REFRESH_INTERVAL clamped to 1"],
+  "targets": [
+    {
+      "url": "https://github.com/myorg/myrepo",
+      "label": "myorg/myrepo",
+      "type": "repo",
+      "listed": true,
+      "want": 2,
+      "have": 2,
+      "running": 2,
+      "busy": 1,
+      "draining": 0,
+      "min": 1,
+      "max": 5,
+      "autoscale": true,
+      "queued": 3,
+      "unsatisfiable": 0,
+      "error": null
+    },
+    {
+      "url": "https://github.com/myorg/other",
+      "label": "myorg/other",
+      "type": "repo",
+      "listed": true,
+      "want": 2,
+      "have": 2,
+      "running": 1,
+      "busy": 0,
+      "draining": 0,
+      "min": null,
+      "max": null,
+      "autoscale": false,
+      "queued": null,
+      "unsatisfiable": null,
+      "error": null
+    },
+    {
+      "url": "https://github.com/myorg",
+      "label": "myorg (org)",
+      "type": "org",
+      "listed": true,
+      "want": 1,
+      "have": 0,
+      "running": 0,
+      "busy": 0,
+      "draining": 0,
+      "min": null,
+      "max": null,
+      "autoscale": false,
+      "queued": null,
+      "unsatisfiable": null,
+      "error": { "class": "scope", "message": "token lacks admin:org", "since": 1790600000 }
+    }
+  ],
+  "runners": [
+    {
+      "id": 1, "name": "mac-1", "target": "https://github.com/myorg/myrepo",
+      "pid": 4121, "state": "idle", "status": "idle",
+      "job": null, "job_started": null, "elapsed": null,
+      "version": "2.337.0", "ephemeral": false, "draining": false, "quarantined": false,
+      "fails": 0, "next_retry": null, "lasterr": null,
+      "log_path": "/abs/runners/.logs/runner-1.log", "work_mb": 120
+    },
+    {
+      "id": 2, "name": "mac-2", "target": "https://github.com/myorg/myrepo",
+      "pid": 4122, "state": "busy", "status": "running: build (12m)",
+      "job": "build", "job_started": 1790611700, "elapsed": 748,
+      "version": "2.337.0", "ephemeral": false, "draining": false, "quarantined": false,
+      "fails": 0, "next_retry": null, "lasterr": null,
+      "log_path": "/abs/runners/.logs/runner-2.log", "work_mb": 340
+    },
+    {
+      "id": 3, "name": "mac-3", "target": "https://github.com/myorg/other",
+      "pid": 4123, "state": "idle", "status": "idle (last: Succeeded)",
+      "job": null, "job_started": null, "elapsed": null,
+      "version": "2.337.0", "ephemeral": false, "draining": false, "quarantined": false,
+      "fails": 0, "next_retry": null, "lasterr": null,
+      "log_path": "/abs/runners/.logs/runner-3.log", "work_mb": null
+    },
+    {
+      "id": 4, "name": "mac-4", "target": "https://github.com/myorg/other",
+      "pid": null, "state": "restarting", "status": "restarting...",
+      "job": null, "job_started": null, "elapsed": null,
+      "version": "2.334.0", "ephemeral": false, "draining": false, "quarantined": false,
+      "fails": 2, "next_retry": 1790612468, "lasterr": "exited unexpectedly",
+      "log_path": "/abs/runners/.logs/runner-4.log", "work_mb": null
+    },
+    {
+      "id": 5, "name": "mac-5", "target": "https://github.com/myorg/myrepo",
+      "pid": null, "state": "quarantined", "status": "quarantined",
+      "job": null, "job_started": null, "elapsed": null,
+      "version": "2.330.0", "ephemeral": false, "draining": false, "quarantined": true,
+      "fails": 5, "next_retry": null,
+      "lasterr": "session conflict: another process holds this runner's registration (cloned dir? second manager?) - remove and re-add",
+      "log_path": "/abs/runners/.logs/runner-5.log", "work_mb": null
+    },
+    {
+      "id": 9, "name": "mac-9", "target": null,
+      "pid": null, "state": "stopped", "status": "unconfigured",
+      "job": null, "job_started": null, "elapsed": null,
+      "version": null, "ephemeral": false, "draining": false, "quarantined": false,
+      "fails": 0, "next_retry": null, "lasterr": null,
+      "log_path": "/abs/runners/.logs/runner-9.log", "work_mb": null
+    }
+  ]
+}

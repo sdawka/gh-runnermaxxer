@@ -1,0 +1,16 @@
+{
+  "schema": 2,
+  "version": "3.1.0",
+  "writer": "daemon",
+  "daemon_pid": 41213,
+  "tick_ts": 1790612448,
+  "refresh_interval": 5,
+  "max_runners": 20,
+  "gh": { "user": null, "host": "github.com", "scopes": [], "state": "auth", "message": "token expired", "checked": 1790612000, "rate_remaining": null, "rate_reset": null, "polled_at": 1790612440 },
+  "tarball": { "version": "2.337.0", "latest": "2.337.0", "stale": false },
+  "disk": { "free_mb": 90000, "pct_free": 80 },
+  "config": { "RUNNER_NAME_PREFIX": "mac", "MAX_RUNNERS": 20, "REFRESH_INTERVAL": 5, "MAX_RESTART_ATTEMPTS": 5, "MAX_LOG_SIZE_MB": 10, "GH_HEALTH_TICKS": 12, "SHARED_TOOL_CACHE": false, "EPHEMERAL_RUNNERS": false, "AUTOSCALE": false, "AUTOSCALE_IDLE_MINUTES": 15 },
+  "warnings": [],
+  "targets": [],
+  "runners": []
+}

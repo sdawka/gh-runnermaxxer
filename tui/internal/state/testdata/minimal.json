@@ -1,0 +1,10 @@
+{
+  "schema": 2,
+  "version": "3.1.0",
+  "writer": "cli",
+  "tick_ts": 1790612448,
+  "targets": [
+    { "url": "https://github.com/myorg/myrepo", "type": "repo" }
+  ],
+  "runners": []
+}
