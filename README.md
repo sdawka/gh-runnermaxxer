@@ -50,6 +50,7 @@ One instance manages runners for any number of repositories and organizations. A
 - **Runner tarball freshness check** - at startup, warns (once, non-fatally) if the shipped tarball is older than the latest `actions/runner` release, so you know new runners are being extracted from a stale version; the latest-release lookup is cached for 24h
 - **Multiple projects in one instance** - run runners for several repositories and organizations side by side; each runner is registered to exactly one of them and the dashboard groups runners by project
 - **Project menu at startup** - arrow-key menu listing your projects from `.runnermaxxer.targets`: ↑/↓ picks a project, ←/→ sets its runner count; `a` adds a new repo/org on the spot; Enter applies by adding or removing runners per project
+- **Autoscaling within bounds** (opt-in, `AUTOSCALE=1`) - give a project `min=`/`max=` bounds and it grows when GitHub has queued runs and no runner is idle, and shrinks by one after runners sit idle for `AUTOSCALE_IDLE_MINUTES`
 - **Uses `gh` CLI** for authentication - no PAT management needed
 
 ## Requirements
@@ -177,8 +178,10 @@ cp .runnermaxxer.conf.sample .runnermaxxer.conf
 | `GH_HEALTH_TICKS` | GitHub-side health check every N ticks, 0 to disable (default: 12) |
 | `SHARED_TOOL_CACHE` | `1` = all runners share one tool cache in `runners/.toolcache` (default: 1). See [Shared Tool Cache](#shared-tool-cache) |
 | `EPHEMERAL_RUNNERS` | `1` = register new runners with `--ephemeral`, one job per registration (default: 0). See [Ephemeral Runners](#ephemeral-runners) |
+| `AUTOSCALE` | `1` = scale projects that have `min=`/`max=` bounds from GitHub's queue (default: 0). See [Autoscaling](#autoscaling) |
+| `AUTOSCALE_IDLE_MINUTES` | Minutes a project must have an idle runner before autoscaling removes one (default: 10) |
 
-`SHARED_TOOL_CACHE` and `EPHEMERAL_RUNNERS` can also be toggled from the dashboard with `e`.
+`SHARED_TOOL_CACHE`, `EPHEMERAL_RUNNERS`, `AUTOSCALE` and `AUTOSCALE_IDLE_MINUTES` can also be changed from the dashboard with `e`.
 
 ### Shared Tool Cache
 
@@ -218,6 +221,7 @@ You rarely need to edit it by hand: the **project menu** at startup (and `t` in 
 | `←`/`→` (or `h`/`l`, `+`/`-`, `0`-`9`) | Change the highlighted project's runner count |
 | `a` | Add a repository or organization (also appended to `.runnermaxxer.targets`) |
 | `x` | Remove the highlighted project from the list (only when it has no runners) |
+| `b` | Set autoscale bounds for the highlighted project (`min max`, e.g. `1 5`; empty clears). See [Autoscaling](#autoscaling) |
 | `Enter` / `s` | Apply: each project is scaled up or down to the chosen count, then open the dashboard |
 | `q` | Quit (at startup) or go back (from the dashboard) |
 
@@ -226,6 +230,33 @@ Applying scales each project independently: new runners are registered to that p
 `./runnermaxxer.sh --target owner/repo` adds a project from the command line and highlights it in the menu; `--no-menu` skips the menu when the current runners are already what you want.
 
 In the dashboard, `+` asks which project to add a runner to when there is more than one; `-` removes a runner by number regardless of project.
+
+### Autoscaling
+
+A line in `.runnermaxxer.targets` may carry optional bounds after the entry, as whitespace-separated `key=value` pairs:
+
+```
+myorg/busy-repo min=1 max=5
+myorg/quiet-repo max=2        # min defaults to 0
+myorg/fixed-repo              # no bounds: fixed count, never autoscaled
+```
+
+(`max` defaults to `MAX_RUNNERS` when only `min` is given; a line with an unknown key, a non-numeric value, or `min` > `max` is ignored with a warning at startup. The `b` key in the project menu writes these for you.)
+
+With `AUTOSCALE=1`, after every GitHub poll (every `GH_HEALTH_TICKS` ticks, so polling must be on) each project **with bounds** is resized:
+
+- **Up**: when it has queued work and no idle runner, it grows by the queue depth, up to `max`.
+- **Down**: when it has had at least one idle runner continuously for `AUTOSCALE_IDLE_MINUTES`, it shrinks by one (busy runners are drained, never killed); the idle clock then restarts, so it removes at most one runner per idle period.
+- It never goes below `min` or above `max` (a project outside its bounds is brought back inside), and never lets the total across all projects exceed `MAX_RUNNERS`.
+- Projects without bounds are never touched, and a project with an unapplied change in the dashboard is left alone until you apply or discard it. Decisions need fresh API data; a project whose queue can't be read is skipped that round.
+
+**Queue depth** for a repository is its number of queued workflow runs (`GET /repos/{owner}/{repo}/actions/runs?status=queued`, one call per poll). Limitations:
+
+- It counts every queued run, including runs waiting for GitHub-hosted runners or for self-hosted runners with labels these runners don't have, so such runs can cause scale-ups up to `max`. Keep `max` modest on repos that mix runner types.
+- A run counts as one even if it will fan out into many jobs; growth continues on later polls while runners stay busy and runs stay queued.
+- For an **organization**, listing every repo's runs would be too expensive, so the signal is only "every one of our runners for the org is busy" (counted as 1 queued). An org project therefore grows one runner per poll while saturated and needs `min` >= 1 to start at all.
+
+The last depth seen is cached in `runners/.pids/queue-<key>.txt` (shown dimmed as `queued: N` in the dashboard next to the project, along with `auto MIN-MAX`), per-project idle timers in `runners/.pids/idle-since-<key>`, and the last scaling action in `runners/.pids/autoscale.last`, e.g. `2026-09-27 12:00:01 owner/repo 2 → 3 (3 queued)`. Autoscaling prints nothing to the screen.
 
 ## Directory Structure
 

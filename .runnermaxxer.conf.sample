@@ -40,3 +40,13 @@ SHARED_TOOL_CACHE="1"
 # in the same directory for the next job. Existing runners keep the mode
 # they were set up with; remove and re-add them to switch (default: 0)
 EPHEMERAL_RUNNERS="0"
+
+# Autoscale projects that have min=/max= bounds in .runnermaxxer.targets
+# (e.g. "owner/repo min=1 max=5") from GitHub's queue of workflow runs.
+# Runs after each GitHub poll, so GH_HEALTH_TICKS must be > 0. Projects
+# without bounds keep their fixed count (default: 0)
+AUTOSCALE="0"
+
+# Minutes an autoscaled project must have an idle runner before one is
+# removed (at most one per period, never below min) (default: 10)
+AUTOSCALE_IDLE_MINUTES="10"

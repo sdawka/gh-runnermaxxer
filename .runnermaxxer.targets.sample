@@ -3,6 +3,7 @@
 # One per line: owner/repo, org-name, or a full https://github.com/... URL.
 # The startup menu shows these and lets you set a runner count for each;
 # pressing 'a' there appends new entries to this file for you.
+# Optional autoscale bounds (used when AUTOSCALE=1): "owner/repo min=1 max=5"
 your-org/your-repo
 your-org/another-repo
 your-org

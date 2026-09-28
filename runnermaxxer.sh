@@ -34,6 +34,8 @@ MAX_LOG_SIZE_MB="${MAX_LOG_SIZE_MB:-10}"
 GH_HEALTH_TICKS="${GH_HEALTH_TICKS:-12}"   # GitHub-side health check every N refresh ticks (0 = off)
 SHARED_TOOL_CACHE="${SHARED_TOOL_CACHE:-1}"  # 1 = all runners share $RUNNER_BASE_DIR/.toolcache
 EPHEMERAL_RUNNERS="${EPHEMERAL_RUNNERS:-0}"  # 1 = register new runners with --ephemeral (one job each)
+AUTOSCALE="${AUTOSCALE:-0}"                  # 1 = scale projects with min=/max= bounds from GitHub's queue
+AUTOSCALE_IDLE_MINUTES="${AUTOSCALE_IDLE_MINUTES:-10}"  # idle this long before an autoscaled project shrinks by one
 
 PID_DIR="$RUNNER_BASE_DIR/.pids"
 LOG_DIR="$RUNNER_BASE_DIR/.logs"
@@ -456,6 +458,15 @@ validate_config() {
     if [[ ! "$EPHEMERAL_RUNNERS" =~ ^[01]$ ]]; then
         errors[${#errors[@]}]="EPHEMERAL_RUNNERS must be 0 or 1, got: $EPHEMERAL_RUNNERS"
     fi
+    if [[ ! "$AUTOSCALE" =~ ^[01]$ ]]; then
+        errors[${#errors[@]}]="AUTOSCALE must be 0 or 1, got: $AUTOSCALE"
+    fi
+    if [[ ! "$AUTOSCALE_IDLE_MINUTES" =~ ^[0-9]+$ ]]; then
+        errors[${#errors[@]}]="AUTOSCALE_IDLE_MINUTES must be a number, got: $AUTOSCALE_IDLE_MINUTES"
+    fi
+    if [[ "$AUTOSCALE" == "1" && "$GH_HEALTH_TICKS" == "0" ]]; then
+        warnings[${#warnings[@]}]="AUTOSCALE=1 has no effect while GH_HEALTH_TICKS=0 (it runs after each GitHub poll)"
+    fi
 
     if [[ ${#warnings[@]} -gt 0 ]]; then
         local warning
@@ -488,6 +499,8 @@ MAX_LOG_SIZE_MB="$MAX_LOG_SIZE_MB"
 GH_HEALTH_TICKS="$GH_HEALTH_TICKS"
 SHARED_TOOL_CACHE="$SHARED_TOOL_CACHE"
 EPHEMERAL_RUNNERS="$EPHEMERAL_RUNNERS"
+AUTOSCALE="$AUTOSCALE"
+AUTOSCALE_IDLE_MINUTES="$AUTOSCALE_IDLE_MINUTES"
 EOF
     mv "$tmp" "$CONFIG_FILE"
     [[ "${1:-}" == "quiet" ]] || echo -e "  ${GREEN}Configuration saved${NC}"
@@ -589,6 +602,40 @@ target_entry_to_url() {
 
 valid_target_url() { valid_repo_url "$1" || valid_org_url "$1"; }
 
+# Split one targets-file line into its entry and optional autoscale bounds:
+#   owner/repo min=1 max=5
+# Sets TL_ENTRY (the entry text, "" for blank/comment lines), TL_MIN and
+# TL_MAX ("" when no bounds). A missing min defaults to 0, a missing max to
+# MAX_RUNNERS. A trailing "# comment" is allowed. Returns 1 when the
+# suffix is malformed (unknown key,
+# non-numeric value, min > max); callers then treat the line as invalid.
+split_target_line() {
+    local line="$1" rest tok k v mn="" mx="" has=0 toks=()
+    TL_ENTRY=""; TL_MIN=""; TL_MAX=""
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == \#* ]] && return 0
+    TL_ENTRY="${line%%[[:space:]]*}"
+    rest="${line#"$TL_ENTRY"}"
+    read -r -a toks <<< "$rest" || true
+    for tok in ${toks[@]+"${toks[@]}"}; do
+        [[ "$tok" == \#* ]] && break        # trailing comment
+        k="${tok%%=*}"; v="${tok#*=}"
+        [[ "$tok" == *=* && "$v" =~ ^[0-9]+$ ]] || return 1
+        case "$k" in
+            min) mn=$v; has=1 ;;
+            max) mx=$v; has=1 ;;
+            *)   return 1 ;;
+        esac
+    done
+    [[ $has -eq 1 ]] || return 0
+    [[ -n "$mn" ]] || mn=0
+    [[ -n "$mx" ]] || mx=$MAX_RUNNERS
+    [[ $mn -le $mx ]] || return 1
+    TL_MIN=$mn; TL_MAX=$mx
+    return 0
+}
+
 target_type() {
     if valid_repo_url "$1"; then echo "repo"; else echo "org"; fi
 }
@@ -634,7 +681,8 @@ load_targets() {
     local line url
     [[ -f "$TARGETS_FILE" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
-        url=$(target_entry_to_url "$line")
+        url=""
+        split_target_line "$line" && url=$(target_entry_to_url "$TL_ENTRY") || url="-"
         [[ -z "$url" ]] && continue
         if valid_target_url "$url"; then
             echo "$url"
@@ -668,13 +716,55 @@ remove_target_from_file() {
     [[ -f "$TARGETS_FILE" ]] || return 0
     : > "$tmp"
     while IFS= read -r line || [[ -n "$line" ]]; do
-        u=$(target_entry_to_url "$line")
+        split_target_line "$line" || true
+        u=$(target_entry_to_url "$TL_ENTRY")
         if [[ -n "$u" ]] && same_target "$u" "$1"; then
             continue
         fi
         printf '%s\n' "$line" >> "$tmp"
     done < "$TARGETS_FILE"
     mv "$tmp" "$TARGETS_FILE"
+}
+
+# Autoscale bounds of a target from the targets file: prints "min max", or
+# nothing when its (first) entry has none. Invalid lines are skipped.
+target_bounds() {
+    local line u
+    [[ -f "$TARGETS_FILE" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        split_target_line "$line" || continue
+        u=$(target_entry_to_url "$TL_ENTRY")
+        [[ -n "$u" ]] && same_target "$u" "$1" || continue
+        [[ -n "$TL_MIN" ]] && echo "$TL_MIN $TL_MAX"
+        return 0
+    done < "$TARGETS_FILE"
+    return 0
+}
+
+# Set (or with empty min/max, clear) a target's bounds in the targets file.
+# The first line naming the target is rewritten in place, keeping its entry
+# text (a trailing comment on that line is dropped); the target is
+# appended first if it isn't listed.
+set_target_bounds() {
+    local url=$1 mn=${2:-} mx=${3:-} tmp="$TARGETS_FILE.tmp.$$" line u hit=0
+    add_target_to_file "$url"
+    : > "$tmp"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ $hit -eq 0 ]] && split_target_line "$line"; then
+            u=$(target_entry_to_url "$TL_ENTRY")
+            if [[ -n "$u" ]] && same_target "$u" "$url"; then
+                if [[ -n "$mn$mx" ]]; then
+                    line="$TL_ENTRY min=${mn:-0} max=${mx:-$MAX_RUNNERS}"
+                else
+                    line="$TL_ENTRY"
+                fi
+                hit=1
+            fi
+        fi
+        printf '%s\n' "$line" >> "$tmp"
+    done < "$TARGETS_FILE"
+    mv "$tmp" "$TARGETS_FILE"
+    return 0
 }
 
 # URL a runner is registered to, from its .runner state file. Falls back
@@ -823,6 +913,7 @@ M_SEL=0; M_MSG=""
 # Rebuild the rows from disk, keeping pending (unapplied) counts
 menu_reload() {
     local old_urls=(${M_URLS[@]+"${M_URLS[@]}"}) old_want=(${M_WANT[@]+"${M_WANT[@]}"})
+    local old_cur=(${M_CUR[@]+"${M_CUR[@]}"})
     local t i j cur
     M_URLS=(); M_CUR=(); M_WANT=(); M_RUN=(); M_LISTED=()
     while IFS= read -r t; do
@@ -835,7 +926,9 @@ menu_reload() {
         M_RUN[i]=$(count_running_for_target "$t")
         for ((j = 0; j < ${#old_urls[@]}; j++)); do
             if same_target "${old_urls[j]}" "$t"; then
-                M_WANT[i]=${old_want[j]}
+                # Keep only real pending edits, so a count that changed
+                # underneath (autoscaling) isn't shown as a pending change
+                [[ "${old_want[j]}" != "${old_cur[j]:-}" ]] && M_WANT[i]=${old_want[j]}
                 break
             fi
         done
@@ -935,6 +1028,55 @@ menu_remove_target() {
     return 0
 }
 
+# 'b' in the project menu: set or clear the highlighted project's
+# autoscale bounds ("min max"; empty clears), saved to the targets file
+menu_set_bounds() {
+    local url b entry="" mn mx extra
+    [[ ${#M_URLS[@]} -eq 0 ]] && return 0
+    url="${M_URLS[M_SEL]}"
+    b=$(target_bounds "$url")
+    tput cnorm 2>/dev/null || true
+    echo ""
+    echo -e "  ${DIM}Autoscale bounds for $(target_label "$url") as 'min max' (e.g. 1 5); empty clears${b:+ (current: $b)}${NC}"
+    printf '  Bounds: '
+    IFS= read -r entry || entry=""
+    tput civis 2>/dev/null || true
+    mn=""; mx=""; extra=""
+    read -r mn mx extra <<< "$entry" || true
+    if [[ -z "$mn" ]]; then
+        [[ -z "$b" ]] && return 0
+        set_target_bounds "$url"
+        M_MSG="${DIM}Autoscale bounds cleared for $(target_label "$url")${NC}"
+    elif [[ "$mn" =~ ^[0-9]+$ && "$mx" =~ ^[0-9]+$ && -z "$extra" && $mn -le $mx ]]; then
+        if [[ $mx -gt $MAX_RUNNERS ]]; then
+            M_MSG="${YELLOW}max ($mx) exceeds MAX_RUNNERS ($MAX_RUNNERS)${NC}"
+            return 0
+        fi
+        set_target_bounds "$url" "$mn" "$mx"
+        M_MSG="${GREEN}$(target_label "$url"): autoscale $mn-$mx${NC}"
+        [[ "$AUTOSCALE" == "1" ]] || M_MSG="$M_MSG ${DIM}(enable AUTOSCALE with 'e' for it to take effect)${NC}"
+    else
+        M_MSG="${YELLOW}Expected two numbers 'min max' with min <= max${NC}"
+        return 0
+    fi
+    menu_reload
+    return 0
+}
+
+# Dim "auto MIN-MAX" (and with "queue", the cached "queued: N") after a
+# project's name
+autoscale_tag() {
+    local b q out=""
+    b=$(target_bounds "$1")
+    [[ -n "$b" ]] && out="  ${DIM}auto ${b% *}-${b#* }${NC}"
+    if [[ "${2:-}" == "queue" ]]; then
+        q=$(cached_queue_depth "$1")
+        [[ -n "$q" && "$q" -gt 0 ]] && out="$out  ${DIM}queued: $q${NC}"
+    fi
+    printf '%s' "$out"
+    return 0
+}
+
 # Scale every target to its chosen count. Returns 0 when the menu can be
 # left (nothing to do, or all changes applied), 1 to stay in the menu.
 apply_target_counts() {
@@ -1011,6 +1153,7 @@ render_target_menu() {
         [[ ${M_WANT[i]} -ne ${M_CUR[i]} ]] && tag="$tag  ${YELLOW}${M_CUR[i]} → ${M_WANT[i]}${NC}"
         [[ ${M_RUN[i]} -gt 0 ]] && tag="$tag  ${GREEN}${M_RUN[i]} running${NC}"
         [[ ${M_LISTED[i]} -eq 0 ]] && tag="$tag  ${DIM}(not in targets file)${NC}"
+        tag="$tag$(autoscale_tag "${M_URLS[i]}")"
 
         if [[ $i -eq $M_SEL ]]; then
             printf "  ${CYAN}▸${NC} ${BOLD}%-40s${NC} [%s]%b\n" "$name" "$box" "$tag"
@@ -1027,6 +1170,7 @@ render_target_menu() {
     local quit_label="back"
     [[ "$mode" == "startup" ]] && quit_label="quit"
     echo -e "  ${CYAN}a${NC} add project   ${CYAN}x${NC} remove from list   ${CYAN}Enter${NC}/${CYAN}s${NC} apply & continue   ${CYAN}q${NC} $quit_label"
+    echo -e "  ${CYAN}b${NC} autoscale bounds ${DIM}(AUTOSCALE=$AUTOSCALE)${NC}"
     if [[ -n "$M_MSG" ]]; then
         echo ""
         echo -e "  $M_MSG"
@@ -1176,6 +1320,7 @@ target_menu() {
             [0-9])     menu_set "$key" ;;
             a|A) menu_add_target ;;
             x|X) menu_remove_target ;;
+            b|B) menu_set_bounds ;;
             enter|s|S)
                 if apply_target_counts; then
                     tput cnorm 2>/dev/null || true
@@ -1709,6 +1854,160 @@ check_github_health() {
         done
     done
     [[ $polled -eq 1 ]] && echo "$now" > "$PID_DIR/gh-poll.ts"
+    # Fresh API data just arrived: let autoscaling act on it
+    autoscale_tick || true
+    return 0
+}
+
+# ----------------------------------------------------------------------------
+# Autoscaling (AUTOSCALE=1, projects with min=/max= bounds only)
+# ----------------------------------------------------------------------------
+
+# Filename-safe key for a target: lowercased owner/repo with '/' -> '+'
+# ('+' can't appear in GitHub names, so keys never collide)
+target_key() {
+    local p
+    p=$(lower "${1#https://github.com/}")
+    echo "${p//\//+}"
+}
+
+# Last queue depth seen for a target (cached by autoscale_tick), or empty
+cached_queue_depth() {
+    local q
+    q=$(cat "$PID_DIR/queue-$(target_key "$1").txt" 2>/dev/null) || q=""
+    [[ "$q" =~ ^[0-9]+$ ]] && echo "$q"
+    return 0
+}
+
+# Pure scaling decision. Prints the desired runner count.
+#   autoscale_decide CUR BUSY QUEUED MIN MAX IDLE_MINUTES_ELAPSED [CAP]
+# CAP is the most this target may have without the sum over all targets
+# exceeding MAX_RUNNERS (omit for no global cap). Rules:
+#   - queued jobs and no idle runner: grow by QUEUED
+#   - an idle runner for >= AUTOSCALE_IDLE_MINUTES and CUR > MIN: shrink by 1
+#   - always clamped to MIN..MAX; growth is also clamped to CAP (but CAP
+#     never forces a shrink)
+autoscale_decide() {
+    local cur=$1 busy=$2 queued=$3 mn=$4 mx=$5 elapsed=$6 cap=${7:-} idle want
+    local threshold=$AUTOSCALE_IDLE_MINUTES
+    [[ "$threshold" =~ ^[0-9]+$ ]] || threshold=10
+    idle=$((cur - busy))
+    [[ $idle -lt 0 ]] && idle=0
+    want=$cur
+    if [[ $queued -gt 0 && $idle -eq 0 ]]; then
+        want=$((cur + queued))
+    elif [[ $idle -gt 0 && $cur -gt $mn && $elapsed -ge $threshold ]]; then
+        want=$((cur - 1))
+    fi
+    [[ $want -gt $mx ]] && want=$mx
+    [[ $want -lt $mn ]] && want=$mn
+    if [[ -n "$cap" && $want -gt $cur && $want -gt $cap ]]; then
+        want=$cap
+        [[ $want -lt $cur ]] && want=$cur
+    fi
+    echo "$want"
+}
+
+# Queue depth for a target. Repos: queued workflow runs (one API call).
+# Orgs: listing every repo's runs is too expensive, so the signal is "all
+# of our runners are busy" (= 1). Returns 1 when the API call fails.
+target_queue_depth() {
+    local url=$1 cur=$2 busy=$3 q
+    if [[ "$(target_type "$url")" == "repo" ]]; then
+        q=$(gh api "repos/${url#https://github.com/}/actions/runs?status=queued&per_page=1" \
+            --jq '.total_count' 2>/dev/null) || return 1
+        [[ "$q" =~ ^[0-9]+$ ]] || return 1
+        echo "$q"
+    elif [[ $cur -gt 0 && $busy -ge $cur ]]; then
+        echo 1
+    else
+        echo 0
+    fi
+    return 0
+}
+
+# One autoscaling pass over every project with bounds. Prints nothing (the
+# caller may be the TUI or a headless daemon); the last action is written
+# to $PID_DIR/autoscale.last and passed to dlog when that function exists.
+autoscale_tick() {
+    [[ "$AUTOSCALE" == "1" ]] || return 0
+    local t b mn mx cur busy queued id key idle since now elapsed want
+    local total=0 cap maxr i skip new reason note rc
+    maxr=$MAX_RUNNERS
+    [[ "$maxr" =~ ^[0-9]+$ ]] || maxr=20
+    now=$(date +%s)
+    mkdir -p "$PID_DIR"
+
+    for t in $(known_targets); do
+        total=$((total + $(count_runners_for_target "$t")))
+    done
+
+    for t in $(known_targets); do
+        b=$(target_bounds "$t")
+        [[ -n "$b" ]] || continue
+        mn=${b% *}; mx=${b#* }
+
+        # Never override a count the user has changed but not applied yet
+        skip=0
+        for ((i = 0; i < ${#M_URLS[@]}; i++)); do
+            if same_target "${M_URLS[i]}" "$t" && [[ "${M_WANT[i]:-}" != "${M_CUR[i]:-}" ]]; then
+                skip=1
+            fi
+        done
+        [[ $skip -eq 1 ]] && continue
+
+        cur=$(count_runners_for_target "$t")
+        # Busy flags must come from this poll (a project with no runners has
+        # none to report, so it can still be brought up to its minimum)
+        [[ $cur -eq 0 ]] || gh_data_fresh || continue
+        busy=0
+        for id in $(runner_ids_for_target "$t"); do
+            is_draining "$id" && continue
+            is_busy "$id" && busy=$((busy + 1))
+        done
+
+        key=$(target_key "$t")
+        queued=$(target_queue_depth "$t" "$cur" "$busy") || continue
+        echo "$queued" > "$PID_DIR/queue-$key.txt"
+
+        idle=$((cur - busy))
+        if [[ $idle -gt 0 ]]; then
+            since=$(cat "$PID_DIR/idle-since-$key" 2>/dev/null) || since=""
+            if [[ ! "$since" =~ ^[0-9]+$ ]]; then
+                since=$now
+                echo "$now" > "$PID_DIR/idle-since-$key"
+            fi
+            elapsed=$(( (now - since) / 60 ))
+        else
+            rm -f "$PID_DIR/idle-since-$key"
+            elapsed=0
+        fi
+
+        cap=$((maxr - (total - cur)))
+        want=$(autoscale_decide "$cur" "$busy" "$queued" "$mn" "$mx" "$elapsed" "$cap")
+        [[ $want -eq $cur ]] && continue
+
+        if [[ $want -gt $cur && $queued -gt 0 && $idle -eq 0 && $cur -ge $mn ]]; then
+            reason="$queued queued"
+        elif [[ $want -lt $cur && $cur -le $mx ]]; then
+            reason="idle ${elapsed}m"
+        else
+            reason="bounds $mn-$mx"
+        fi
+        rc=0
+        scale_target "$t" "$want" >/dev/null 2>&1 || rc=1
+        new=$(count_runners_for_target "$t")
+        total=$((total - cur + new))
+        # A shrink restarts the idle clock: at most one removal per period
+        [[ $want -lt $cur ]] && echo "$now" > "$PID_DIR/idle-since-$key"
+
+        note="$(date '+%Y-%m-%d %H:%M:%S') $(target_label "$t") $cur → $want ($reason)"
+        [[ $rc -eq 0 ]] || note="$note - failed, now $new"
+        echo "$note" > "$PID_DIR/autoscale.last"
+        if declare -F dlog >/dev/null 2>&1; then
+            dlog "$note" || true
+        fi
+    done
     return 0
 }
 # ============================================================================
@@ -2087,6 +2386,7 @@ render_ui() {
         tag=""
         [[ ${M_WANT[i]} -ne ${M_CUR[i]} ]] && tag="  ${YELLOW}${M_CUR[i]} → ${M_WANT[i]}${NC}"
         [[ ${M_LISTED[i]} -eq 0 ]] && tag="$tag  ${DIM}(not in targets file)${NC}"
+        tag="$tag$(autoscale_tag "$t" queue)"
         if [[ $i -eq $M_SEL ]]; then
             printf "  ${CYAN}▸${NC} ${BOLD}%-40s${NC} [%s]%b\n" "$name" "$box" "$tag"
         elif [[ ${M_CUR[i]} -eq 0 ]]; then
@@ -2299,7 +2599,9 @@ edit_config() {
     echo -e "  ${CYAN}2${NC}) Change runner name prefix (current: $RUNNER_NAME_PREFIX)"
     echo -e "  ${CYAN}3${NC}) Toggle shared tool cache (current: $SHARED_TOOL_CACHE)"
     echo -e "  ${CYAN}4${NC}) Toggle ephemeral runners for new runners (current: $EPHEMERAL_RUNNERS)"
-    echo -e "  ${CYAN}5${NC}) Cancel"
+    echo -e "  ${CYAN}5${NC}) Toggle autoscale for projects with bounds (current: $AUTOSCALE)"
+    echo -e "  ${CYAN}6${NC}) Autoscale idle minutes before scaling down (current: $AUTOSCALE_IDLE_MINUTES)"
+    echo -e "  ${CYAN}7${NC}) Cancel"
     echo ""
     printf '  Choice: '
     read -rsn1 choice
@@ -2331,6 +2633,21 @@ edit_config() {
             if [[ "$EPHEMERAL_RUNNERS" == "1" ]]; then EPHEMERAL_RUNNERS=0; else EPHEMERAL_RUNNERS=1; fi
             save_config
             echo -e "  ${DIM}Ephemeral runners: $EPHEMERAL_RUNNERS (runners added from now on; remove and re-add existing ones to switch)${NC}"
+            ;;
+        5)
+            if [[ "$AUTOSCALE" == "1" ]]; then AUTOSCALE=0; else AUTOSCALE=1; fi
+            save_config
+            echo -e "  ${DIM}Autoscale: $AUTOSCALE (only projects with bounds - set them with 'b' in the projects menu)${NC}"
+            ;;
+        6)
+            printf '  Idle minutes before an autoscaled project shrinks by one: '
+            read -r mins
+            if [[ "$mins" =~ ^[0-9]+$ ]]; then
+                AUTOSCALE_IDLE_MINUTES=$mins
+                save_config
+            elif [[ -n "$mins" ]]; then
+                echo -e "  ${YELLOW}Expected a whole number of minutes${NC}"
+            fi
             ;;
     esac
     sleep 1
