@@ -4,6 +4,11 @@ on:
     tags:
       - "v*"
 
+# The default GITHUB_TOKEN is read-only; goreleaser needs contents:write to
+# create the release and upload the archives.
+permissions:
+  contents: write
+
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
