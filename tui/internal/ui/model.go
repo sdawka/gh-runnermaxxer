@@ -20,14 +20,17 @@ const (
 	daemonLogID = -2
 )
 
-// Screen identifies which top-level view is active. Only ScreenDashboard
-// exists so far; the others are added as their commits land (Go plan §8,
-// commits 11-13).
+// Screen identifies which top-level view is active. ScreenConfig,
+// ScreenLogs (the full-screen log viewer is handled separately via
+// Model.Log) and ScreenGHStatus are added as their commits land (Go plan
+// §8, commits 12-13).
 type Screen int
 
 const (
 	ScreenDashboard Screen = iota
 	ScreenProjects
+	ScreenAddTarget
+	ScreenBounds
 )
 
 // Level is a Notice's severity, used to pick its style.
@@ -88,6 +91,13 @@ type Model struct {
 	Screen  Screen
 	Help    bool
 	Confirm *ConfirmModel
+
+	// formReturn is the screen to restore once the currently open form
+	// (AddTarget or Bounds) closes, since 'a' opens the same form from
+	// either the dashboard or the projects screen (§3.4).
+	formReturn Screen
+	AddTarget  *AddTargetForm
+	Bounds     *BoundsForm
 
 	Width, Height int
 	ShowLog       bool // wide enough for a permanent side log pane, if one is open

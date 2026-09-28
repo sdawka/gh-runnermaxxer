@@ -97,6 +97,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return updated, cmd
 			}
 		}
+		switch m.Screen {
+		case ScreenAddTarget:
+			return m.handleAddTargetKey(msg)
+		case ScreenBounds:
+			return m.handleBoundsKey(msg)
+		}
 		return m.handleKey(msg)
 	}
 	return m, nil
@@ -190,7 +196,24 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.confirmAllVariant("restart", func(mm Model) (Model, tea.Cmd) { return mm.execRestartAll() })
 
 	case ActionApply:
-		return m.applyPending()
+		mm, cmd := m.applyPending()
+		if m.Screen == ScreenProjects {
+			mm.Screen = ScreenDashboard
+		}
+		return mm, cmd
+
+	case ActionProjects:
+		m.Screen = ScreenProjects
+		return m, nil
+
+	case ActionAddTarget:
+		return m.openAddTargetForm()
+
+	case ActionBounds:
+		return m.openBoundsForm()
+
+	case ActionRemoveFromList:
+		return m.removeFromList()
 
 	case ActionHelp:
 		m.Help = !m.Help
@@ -221,6 +244,14 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ActionDiscardOrBack:
+		// Projects screen: 'q'/Esc discard silently and return to the
+		// dashboard (§3.4: "bash discards silently on q ... keep that").
+		// Dashboard: Esc discards with a toast; there's nowhere to "back" to.
+		if m.Screen == ScreenProjects {
+			m.Pending.Clear()
+			m.Screen = ScreenDashboard
+			return m, nil
+		}
 		if !m.Pending.Empty() {
 			m.Pending.Clear()
 			m.notice("Pending changes discarded", LevelWarn)
@@ -250,9 +281,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openDaemonLog()
 	}
 
-	// ActionProjects, ActionAddTarget, ActionCheckGH, ActionConfig,
-	// ActionDownload, ActionBounds and ActionRemoveFromList are handled once
-	// the screens/exec wiring that give them meaning land (commit 11).
+	// ActionCheckGH, ActionConfig and ActionDownload are handled once the
+	// screens/exec wiring that give them meaning land (commits 12-13).
 	return m, nil
 }
 
