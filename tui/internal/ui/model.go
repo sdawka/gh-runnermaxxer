@@ -79,10 +79,13 @@ type Model struct {
 	DaemonUp bool
 	Now      time.Time
 
-	Cursor    int
-	Pending   *PendingCounts
-	Filter    string
-	Filtering bool
+	Cursor int
+	// TableOffset is the first table row on screen when the table has more
+	// rows than fit; Update keeps it following the cursor (scrollTable).
+	TableOffset int
+	Pending     *PendingCounts
+	Filter      string
+	Filtering   bool
 
 	Inflight map[string]Op
 	Spinner  spinner.Model

@@ -12,6 +12,22 @@ import (
 // message lifecycle (snapshot updates, the clock, resize) and the
 // pending-count keys that don't need a rendered table to make sense.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updated, cmd := m.update(msg)
+	mm, ok := updated.(Model)
+	if !ok {
+		return updated, cmd
+	}
+	return mm.afterUpdate(cmd)
+}
+
+// afterUpdate runs the bookkeeping every message needs once it has been
+// handled: keeping the table's scroll window following the cursor.
+func (m Model) afterUpdate(cmd tea.Cmd) (tea.Model, tea.Cmd) {
+	m.TableOffset = m.tableWindow(m.tableHeight()).offset
+	return m, cmd
+}
+
+func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.Width = msg.Width

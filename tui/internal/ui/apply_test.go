@@ -90,7 +90,7 @@ func TestRenderTargetRowShowsSpinnerWhenInflight(t *testing.T) {
 	m := newActionsTestModel(f, snap)
 	m.Inflight[targetKey(urlA)] = Op{Verb: "scale"}
 
-	line := m.renderTargetRow(snap.Targets[0], false, 40)
+	line := m.renderTargetRow(snap.Targets[0], false, tableColumns(80, 0, true))
 	if !strings.Contains(line, m.Spinner.View()) {
 		t.Errorf("target row missing spinner while in-flight:\n%s", line)
 	}
@@ -102,7 +102,7 @@ func TestRenderRunnerRowShowsSpinnerWhenInflight(t *testing.T) {
 	m := newActionsTestModel(f, state.Snapshot{Runners: []state.Runner{r}})
 	m.Inflight[runnerKey(1)] = Op{Verb: "stop"}
 
-	line := m.renderRunnerRow(r, false, false)
+	line := m.renderRunnerRow(r, false, tableColumns(80, 0, true))
 	if !strings.Contains(line, m.Spinner.View()) {
 		t.Errorf("runner row missing spinner while in-flight:\n%s", line)
 	}

@@ -73,7 +73,7 @@ func (m Model) renderString() string {
 	if m.Log != nil {
 		tableWidth = m.Width - m.logPaneWidth() - 1
 	}
-	table := m.renderTable(tableWidth)
+	table := strings.Join(m.renderTable(m.tableColumns(tableWidth, true), m.tableHeight()), "\n")
 	if m.Log != nil {
 		height := m.Height - 6
 		if height < 5 {
@@ -102,6 +102,27 @@ func (m Model) renderString() string {
 	}
 
 	return b.String()
+}
+
+// tableHeight is how many lines the table may use: the frame height minus
+// the header, banners, projects title and footer. 0 (unbounded) until the
+// first WindowSizeMsg.
+func (m Model) tableHeight() int {
+	if m.Height <= 0 {
+		return 0
+	}
+	used := len(m.renderHeader()) + len(m.renderBanners())
+	if m.Screen == ScreenProjects {
+		used++
+	}
+	if m.renderFooter() != "" {
+		used++
+	}
+	h := m.Height - used
+	if h < 1 {
+		h = 1
+	}
+	return h
 }
 
 // renderLogFullScreen replaces the whole frame with the open log view, for

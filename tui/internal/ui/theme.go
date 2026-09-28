@@ -69,6 +69,12 @@ type Glyphs struct {
 	Running, Idle, Stopped, Backoff, Quarantined string
 	HeaderOpen, Selected                         string
 	Warn                                         string
+
+	// Layout chrome: the ellipsis used when truncating, the "N more"
+	// scroll indicators, and the horizontal/vertical rules that separate
+	// the table, detail block, log tail and side pane.
+	Ellipsis, MoreUp, MoreDown string
+	RuleH, RuleV               string
 }
 
 // NewGlyphs returns the Unicode glyph set, or the ASCII fallback when
@@ -78,10 +84,12 @@ func NewGlyphs(noUnicode bool) Glyphs {
 		return Glyphs{
 			Running: "*", Idle: "*", Stopped: "o", Backoff: ".", Quarantined: "X",
 			HeaderOpen: "v", Selected: "<", Warn: "!",
+			Ellipsis: "~", MoreUp: "^", MoreDown: "v", RuleH: "-", RuleV: "|",
 		}
 	}
 	return Glyphs{
 		Running: "●", Idle: "●", Stopped: "○", Backoff: "◌", Quarantined: "✖",
 		HeaderOpen: "▾", Selected: "◂", Warn: "⚠",
+		Ellipsis: "…", MoreUp: "▲", MoreDown: "▼", RuleH: "─", RuleV: "│",
 	}
 }
