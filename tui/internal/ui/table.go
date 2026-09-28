@@ -65,6 +65,9 @@ func (m Model) renderTargetRow(t state.Target, selected bool, labelWidth int) st
 	if pending != have {
 		countStr = m.Theme.Pending.Render(fmt.Sprintf("%d -> %d", have, pending))
 	}
+	if _, inflight := m.Inflight[targetKey(t.URL)]; inflight {
+		countStr = m.Spinner.View() + " " + countStr
+	}
 
 	var tail []string
 	if !t.Listed {
@@ -95,6 +98,9 @@ func (m Model) renderUnassignedHeader(selected bool) string {
 func (m Model) renderRunnerRow(r state.Runner, selected bool, showJob bool) string {
 	marker := m.cursorMarker(selected)
 	glyph, style := m.runnerGlyph(r)
+	if _, inflight := m.Inflight[runnerKey(r.ID)]; inflight {
+		glyph, style = m.Spinner.View(), m.Theme.Dim
+	}
 
 	pid := "-"
 	if r.PID != 0 {

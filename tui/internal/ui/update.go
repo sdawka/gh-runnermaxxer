@@ -48,7 +48,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case cmdResultMsg:
 		delete(m.Inflight, msg.key)
 		m.noticeFromResult(msg.res)
-		return m, nil
+		// Reload immediately rather than waiting for the next daemon tick
+		// or watcher event, so the mutation's effect shows up right away.
+		return m, pollCLI(m.ctx, m.Client)
+
+	case applyResultMsg:
+		for _, key := range msg.keys {
+			delete(m.Inflight, key)
+		}
+		m.noticeFromResult(msg.res)
+		// Pending entries are left as-is here: they clear on their own via
+		// Pending.Reconcile once a later snapshot's Have actually catches
+		// up (new runners take time to spin up), not the moment the exec
+		// that requested them returns.
+		return m, pollCLI(m.ctx, m.Client)
 
 	case tea.KeyPressMsg:
 		if m.Confirm != nil {
@@ -146,6 +159,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionRestartAll:
 		return m.confirmAllVariant("restart", func(mm Model) (Model, tea.Cmd) { return mm.execRestartAll() })
 
+	case ActionApply:
+		return m.applyPending()
+
 	case ActionHelp:
 		m.Help = !m.Help
 		return m, nil
@@ -186,10 +202,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ActionApply (§scale application), ActionProjects, ActionAddTarget,
-	// ActionLogs, ActionDaemonLog, ActionCheckGH, ActionConfig,
-	// ActionDownload, ActionBounds and ActionRemoveFromList are handled once
-	// the screens/exec wiring that give them meaning land (commits 9-11).
+	// ActionProjects, ActionAddTarget, ActionLogs, ActionDaemonLog,
+	// ActionCheckGH, ActionConfig, ActionDownload, ActionBounds and
+	// ActionRemoveFromList are handled once the screens/exec wiring that
+	// give them meaning land (commits 10-11).
 	return m, nil
 }
 

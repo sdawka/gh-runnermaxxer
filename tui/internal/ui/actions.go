@@ -15,6 +15,9 @@ import (
 // runnerKey builds the Inflight/Confirm key for a single runner's op.
 func runnerKey(id int) string { return "runner:" + strconv.Itoa(id) }
 
+// targetKey builds the Inflight key for a target's scale-apply op.
+func targetKey(url string) string { return "target:" + url }
+
 // globalKey is the Inflight key for a fleet-wide op (an -all variant).
 const globalKey = "global"
 
@@ -257,6 +260,33 @@ func (m Model) execRestartAll() (Model, tea.Cmd) {
 			return client.Start(ctx, id)
 		})
 	})
+}
+
+// applyPending runs every pending scale edit in one `--scale` exec (Client.
+// Scale already builds one "--scale url=N" flag per entry, sorted for
+// deterministic argv), marking each changed target in-flight so its row can
+// show a spinner. A no-op (nothing pending) or an apply already running for
+// one of the changed targets is a toast, not a second exec.
+func (m Model) applyPending() (Model, tea.Cmd) {
+	changes := m.Pending.Changes()
+	if len(changes) == 0 {
+		return m, nil
+	}
+	keys := make([]string, 0, len(changes))
+	for url := range changes {
+		key := targetKey(url)
+		if _, busy := m.Inflight[key]; busy {
+			m.notice("apply already in progress for "+url, LevelWarn)
+			return m, nil
+		}
+		keys = append(keys, key)
+	}
+	op := Op{Verb: "scale", Started: m.Now}
+	client := m.Client
+	return m, tea.Batch(
+		startedMany(keys, op),
+		applyVerb(m.ctx, keys, op, func(ctx context.Context) cli.Result { return client.Scale(ctx, changes) }),
+	)
 }
 
 // noticeFromResult turns an exec's cli.Result into a toast: the script's

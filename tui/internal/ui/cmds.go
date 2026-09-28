@@ -63,3 +63,22 @@ func runVerb(ctx context.Context, key string, op Op, exec func(context.Context) 
 func started(key string, op Op) tea.Cmd {
 	return func() tea.Msg { return cmdStartedMsg{key: key, op: op} }
 }
+
+// startedMany announces the same Op as in-flight under several keys at
+// once, for an apply that touches more than one target in a single exec.
+func startedMany(keys []string, op Op) tea.Cmd {
+	cmds := make([]tea.Cmd, len(keys))
+	for i, k := range keys {
+		cmds[i] = started(k, op)
+	}
+	return tea.Batch(cmds...)
+}
+
+// applyVerb execs the pending-scale exec and reports its result against
+// every key it covers, so Update can clear all of their spinners together.
+func applyVerb(ctx context.Context, keys []string, op Op, exec func(context.Context) cli.Result) tea.Cmd {
+	return func() tea.Msg {
+		res := exec(ctx)
+		return applyResultMsg{keys: keys, op: op, res: res}
+	}
+}

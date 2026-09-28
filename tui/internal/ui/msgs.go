@@ -35,6 +35,15 @@ type cmdResultMsg struct {
 	res cli.Result
 }
 
+// applyResultMsg carries the outcome of applying pending scale edits: one
+// exec covering every changed target, reported against all of their
+// Inflight keys at once so each changed row's spinner clears together.
+type applyResultMsg struct {
+	keys []string
+	op   Op
+	res  cli.Result
+}
+
 // logLinesMsg carries new lines for the log pane/viewer. reset is true
 // right after the underlying file was truncated (rotation): the consumer
 // should replace its buffer instead of appending.
