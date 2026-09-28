@@ -193,72 +193,37 @@ func (m Model) confirmAllVariant(verb string, run func(Model) (Model, tea.Cmd)) 
 	return m, nil
 }
 
-// sequentialRunnerVerb runs verb for each id in turn inside the caller's Cmd
-// goroutine, aggregating into one cli.Result (concatenated stdout/stderr,
-// the last non-zero exit code wins) so the whole batch reports as a single
-// cmdResultMsg.
-func sequentialRunnerVerb(ctx context.Context, ids []int, verb func(context.Context, int) cli.Result) cli.Result {
-	var agg cli.Result
-	for _, id := range ids {
-		res := verb(ctx, id)
-		agg.Stdout += res.Stdout
-		if res.ExitCode != 0 || res.Err != nil {
-			agg.ExitCode = res.ExitCode
-			agg.Stderr += res.Stderr
-			if res.Err != nil {
-				agg.Err = res.Err
-			}
-		}
-	}
-	return agg
-}
-
+// execStopAll, execStartAll and execRestartAll call the real --stop-all /
+// --start-all flags the bash side landed after this Stage 2 work started
+// (runnermaxxer.sh --help: "--stop-all Stop every runner (even mid-job)" /
+// "--start-all Start every runner (clears quarantine)"), one atomic exec
+// each instead of looping a per-runner verb across the fleet.
+// confirmAllVariant already gets the user's go-ahead when any runner is
+// busy, mirroring stop_all's own interactive "Jobs in progress ... stop
+// anyway?" prompt (which --stop-all itself skips, being headless).
+// restart_all in the script is just stop_all followed by start_all, so
+// execRestartAll composes the same two execs sequentially.
 func (m Model) execStopAll() (Model, tea.Cmd) {
 	op := Op{Verb: "stop-all", Started: m.Now}
-	ids := allRunnerIDs(m.Snap)
 	client := m.Client
-	busy := map[int]bool{}
-	for _, id := range busyRunnerIDs(m.Snap) {
-		busy[id] = true
-	}
-	return m.startOp(globalKey, op, func(ctx context.Context) cli.Result {
-		return sequentialRunnerVerb(ctx, ids, func(ctx context.Context, id int) cli.Result {
-			if busy[id] {
-				return client.Drain(ctx, id)
-			}
-			return client.Stop(ctx, id)
-		})
-	})
+	return m.startOp(globalKey, op, func(ctx context.Context) cli.Result { return client.StopAll(ctx) })
 }
 
 func (m Model) execStartAll() (Model, tea.Cmd) {
 	op := Op{Verb: "start-all", Started: m.Now}
-	ids := allRunnerIDs(m.Snap)
 	client := m.Client
-	return m.startOp(globalKey, op, func(ctx context.Context) cli.Result {
-		return sequentialRunnerVerb(ctx, ids, client.Start)
-	})
+	return m.startOp(globalKey, op, func(ctx context.Context) cli.Result { return client.StartAll(ctx) })
 }
 
 func (m Model) execRestartAll() (Model, tea.Cmd) {
 	op := Op{Verb: "restart-all", Started: m.Now}
-	ids := allRunnerIDs(m.Snap)
 	client := m.Client
-	busy := map[int]bool{}
-	for _, id := range busyRunnerIDs(m.Snap) {
-		busy[id] = true
-	}
 	return m.startOp(globalKey, op, func(ctx context.Context) cli.Result {
-		return sequentialRunnerVerb(ctx, ids, func(ctx context.Context, id int) cli.Result {
-			if busy[id] {
-				return client.Drain(ctx, id)
-			}
-			stopRes := client.Stop(ctx, id)
-			if stopRes.Err != nil || stopRes.ExitCode != 0 {
-				return stopRes
-			}
-			return client.Start(ctx, id)
-		})
+		stopRes := client.StopAll(ctx)
+		if stopRes.Err != nil || stopRes.ExitCode != 0 {
+			return stopRes
+		}
+		return client.StartAll(ctx)
 	})
 }
 
