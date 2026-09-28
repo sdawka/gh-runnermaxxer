@@ -4297,11 +4297,11 @@ state_json() {
     sep=""
     for k in $CONFIG_KEYS; do
         eval "v=\${$k:-}"
-        if [[ "$k" == "RUNNER_NAME_PREFIX" ]]; then
-            printf '%s"%s":%s' "$sep" "$k" "$(json_str "$v")"
-        else
-            printf '%s"%s":%s' "$sep" "$k" "$(json_num "$v")"
-        fi
+        case "$k" in
+            RUNNER_NAME_PREFIX) printf '%s"%s":%s' "$sep" "$k" "$(json_str "$v")" ;;
+            SHARED_TOOL_CACHE|EPHEMERAL_RUNNERS|AUTOSCALE) printf '%s"%s":%s' "$sep" "$k" "$(json_bool "$v")" ;;
+            *) printf '%s"%s":%s' "$sep" "$k" "$(json_num "$v")" ;;
+        esac
         sep=","
     done
     printf '},"warnings":['
