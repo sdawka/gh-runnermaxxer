@@ -100,3 +100,50 @@ t_fail_ok "no snapshot -> not served" status_json_cached
 # A CLI writer: daemon_pid comes from daemon_pid (none here)
 write_state_snapshot cli
 t_ok "writer cli, no daemon" grep -q '"writer":"cli","daemon_pid":null' "$PID_DIR/state.json"
+
+# --- disk: filesystem free (df shim) and per-runner usage ----------------------------
+DFDIR="$TEST_TMP_DIR/dfbin"; mkdir -p "$DFDIR"
+printf '#!/bin/sh\necho "Filesystem 1024-blocks Used Available Capacity Mounted on"\necho "/dev/x 1000000 900000 100000 90%% /"\n' > "$DFDIR/df"
+chmod +x "$DFDIR/df"
+t_eq "10" "$(PATH="$DFDIR:$PATH" disk_free_pct)" "disk_free_pct from df -Pk columns 2 and 4"
+t_eq "97" "$(PATH="$DFDIR:$PATH" free_disk_mb)" "free_disk_mb from the same table"
+DLOGF="$TEST_TMP_DIR/dlog"
+dlog() { echo "$1" >> "$DLOGF"; }
+(
+    PATH="$DFDIR:$PATH"
+    state_warnings
+    case "${STATE_WARNINGS[*]}" in *"low disk: 10% free"*) t_eq 1 1 "low disk shows in warnings[]" ;; *) t_eq "...low disk: 10% free..." "${STATE_WARNINGS[*]}" "low disk shows in warnings[]" ;; esac
+    rm -rf "$RUNNER_BASE_DIR"/runner-*
+    disk_usage_tick; disk_usage_tick
+    t_eq "1" "$(grep -c 'low disk' "$DLOGF")" "the daemon logs low disk once, not every tick"
+)
+
+rm -rf "$RUNNER_BASE_DIR"/runner-*
+rm -f "$PID_DIR"/runner-*
+make_runner_dir 1 "$REPO"
+mkdir -p "$RUNNER_BASE_DIR/runner-1/_work" "$RUNNER_BASE_DIR/runner-1/_diag"
+dd if=/dev/zero of="$RUNNER_BASE_DIR/runner-1/_work/blob" bs=1024 count=2048 2>/dev/null
+DISK_TICK=0
+disk_usage_tick
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [[ -f "$PID_DIR/runner-1.workmb" ]] && break
+    sleep 0.2
+done
+t_ok "disk_usage_tick writes runner-N.workmb in the background" test -f "$PID_DIR/runner-1.workmb"
+t_ok "workmb counts _work (2 MB)" test "$(cat "$PID_DIR/runner-1.workmb")" -ge 1
+for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -f "$PID_DIR/runner-1.workmb.pending" ]] || break; sleep 0.2; done
+t_fail_ok "the pending marker is cleared" test -f "$PID_DIR/runner-1.workmb.pending"
+echo 999 > "$PID_DIR/runner-1.workmb"
+disk_usage_tick
+sleep 0.5
+t_eq "999" "$(cat "$PID_DIR/runner-1.workmb")" "within the throttle window the figure is not recomputed"
+DISK_TICK=$((DISK_USAGE_TICKS - 1))
+disk_usage_tick
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [[ "$(cat "$PID_DIR/runner-1.workmb")" != "999" ]] && break
+    sleep 0.2
+done
+t_eq "2" "$(cat "$PID_DIR/runner-1.workmb")" "every DISK_USAGE_TICKS ticks it is recomputed"
+status_collect
+t_eq "2" "${R_WORKMB[0]}" "status_collect reads work_mb"
+wait 2>/dev/null || true

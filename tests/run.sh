@@ -49,7 +49,13 @@ FAIL_FILES=()
 
 for f in "$TESTS_DIR"/test_*.sh; do
     [[ -e "$f" ]] || continue
-    out=$(run_one "$f" 2>&1)
+    frc=0
+    out=$(run_one "$f" 2>&1) || frc=$?
+    # A file that dies part-way (set -e in the sourced script, a typo)
+    # would otherwise just report fewer PASS lines
+    if [[ $frc -ne 0 ]]; then
+        out="$out"$'\n'"  FAIL $(basename "$f") exited with status $frc before finishing"
+    fi
     echo "$out"
     # Strip ANSI colour codes before counting (they sit between the marker
     # word and the surrounding spaces, so a plain grep on '  PASS ' misses).
