@@ -25,6 +25,9 @@ t_eq "" "$(runner_exit_reason 1)" "a lifecycle line after the reason outranks it
 make_log 1 "$L: Running job: build" "$L: Job build completed with result: Succeeded" "Exiting with unknown error code: 3"
 t_eq "unknown${TAB}3" "$(runner_exit_reason 1)" "reason after a finished job counts"
 t_eq "" "$(runner_exit_reason 99)" "no log -> no reason"
+make_log 1 "$L: Listening for Jobs" "$L: Authentication failed with status code 401"
+t_eq "creds$TAB" "$(runner_exit_reason 1)" "credentials rejected"
+t_eq "runner credentials rejected - remove and re-add" "$(runner_exit_note "creds$TAB")" "note: creds"
 
 # --- runner_exit_note ---------------------------------------------------------------
 case "$(runner_exit_note "conflict$TAB")" in "session conflict"*) t_eq 1 1 "note: conflict" ;; *) t_eq "session conflict..." "$(runner_exit_note "conflict$TAB")" "note: conflict" ;; esac

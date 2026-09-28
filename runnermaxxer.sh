@@ -96,7 +96,7 @@ cleanup() {
     fi
     [[ "$OP_LOCK_ACQUIRED" == "1" ]] && rm -f "$OP_LOCK_FILE"
     # Per-process gh scratch files (see gh_api)
-    rm -f "$PID_DIR/.gh.last.$$" "$PID_DIR/.gh.hdr.$$" 2>/dev/null || true
+    rm -f "$PID_DIR/.gh.last.$$" "$PID_DIR/.qunsat.$$" "$PID_DIR/.gh.hdr.$$" 2>/dev/null || true
     if [[ "$DAEMON_MODE" == "1" && "$(cat "$DAEMON_PID_FILE" 2>/dev/null)" == "$$" ]]; then
         rm -f "$DAEMON_PID_FILE"
     fi
@@ -2185,7 +2185,8 @@ gh_data_fresh() {
     local ts max now
     ts=$(cat "$PID_DIR/gh-poll.ts" 2>/dev/null || echo "")
     [[ "$ts" =~ ^[0-9]+$ ]] || return 1
-    max=$((GH_HEALTH_TICKS * REFRESH_INTERVAL * 2))
+    # Two poll intervals (the interval grows with the target count)
+    max=$(( $(effective_health_ticks "${HEALTH_N_TARGETS:-0}") * REFRESH_INTERVAL * 2 ))
     [[ $max -lt 30 ]] && max=30
     now=$(date +%s)
     [[ $((now - ts)) -le $max ]]
@@ -2291,14 +2292,16 @@ is_busy() {
 #   deprecated  runner too old for GitHub (exit 7)
 #   terminated  listener exited with 1
 #   unknown     unknown exit code (detail = the code)
+#   creds       the listener's credentials were rejected (U9)
 # A lifecycle line after it (the runner was relaunched and got going)
 # outranks it, as does a retry/update line (run.sh loops on those).
 runner_exit_reason() {
     local last
     last=$(tail -40 "$LOG_DIR/runner-$1.log" 2>/dev/null \
-        | grep -E 'Session Conflict|deprecated version exit code|exit with terminated error|unknown error code|retryable error|because of updating|Update finished|Listening for Jobs|Starting Runner listener|Running job:|completed with result' \
+        | grep -E 'Session Conflict|deprecated version exit code|exit with terminated error|unknown error code|Authentication failed|[Cc]redentials|retryable error|because of updating|Update finished|Listening for Jobs|Starting Runner listener|Running job:|completed with result' \
         | tail -1) || last=""
     case "$last" in
+        *"Authentication failed"*|*[Cc]redentials*) printf 'creds\t\n' ;;
         *"Session Conflict"*)              printf 'conflict\t\n' ;;
         *"deprecated version exit code"*)  printf 'deprecated\t\n' ;;
         *"exit with terminated error"*)    printf 'terminated\t\n' ;;
@@ -2314,6 +2317,7 @@ runner_exit_note() {
         deprecated) echo "runner version too old for GitHub - run --download, then remove and re-add" ;;
         terminated) echo "listener exited (terminated, exit 1) - see log" ;;
         unknown)    echo "listener exited with code ${1#*$'\t'} - see log" ;;
+        creds)      echo "runner credentials rejected - remove and re-add" ;;
     esac
 }
 
@@ -2474,18 +2478,98 @@ supervise_runners() {
     return 0
 }
 
+# ---- Rate limit (A5) --------------------------------------------------------
+# Poll interval in ticks, scaled with the number of targets that have
+# runners so the poll load stays roughly constant (~1 request per target
+# per poll): GH_HEALTH_TICKS * max(1, ceil(N/10)). Pure.
+effective_health_ticks() {
+    local n=${1:-0} f
+    f=$(( (n + 9) / 10 ))
+    [[ $f -ge 1 ]] || f=1
+    echo $(( GH_HEALTH_TICKS * f ))
+}
+HEALTH_N_TARGETS=0
+
+# gh_rate_ok NEED - 0 when a poll that needs about NEED requests may run.
+# Reads /rate_limit (free: it doesn't count against the limit) into
+# gh.rate (remaining<TAB>reset<TAB>checked). While the limit is exhausted
+# the ratelimit state is kept until the reset time without calling gh.
+gh_rate_ok() {
+    local need=${1:-1} now out rem reset f="$PID_DIR/gh.rate"
+    now=$(date +%s)
+    if [[ "$(gh_state)" == "ratelimit" && -f "$f" ]]; then
+        reset=$(cut -f2 "$f" 2>/dev/null) || reset=""
+        [[ "$reset" =~ ^[0-9]+$ && $now -lt $reset ]] && return 1
+    fi
+    if ! out=$(gh_api rate_limit --jq '.resources.core | "\(.remaining)\t\(.reset)"'); then
+        gh_last_load
+        # Rate-limited or offline: skip this poll. Anything else (a
+        # rejected token, no such endpoint on some GHES setups) goes on to
+        # the normal poll, which re-probes and records per-target errors.
+        case "$GH_CLASS" in ratelimit|network) return 1 ;; esac
+        return 0
+    fi
+    rem=${out%%$'\t'*}; reset=${out#*$'\t'}
+    [[ "$rem" =~ ^[0-9]+$ && "$reset" =~ ^[0-9]+$ ]] || return 0
+    printf '%s\t%s\t%s\n' "$rem" "$reset" "$now" > "$f" 2>/dev/null || true
+    if [[ $rem -lt $((need + 20)) ]]; then
+        local at
+        at=$(date -r "$reset" '+%H:%M' 2>/dev/null || date -d "@$reset" '+%H:%M' 2>/dev/null || echo "$reset")
+        gh_set_last ratelimit "" "rate limit exhausted ($rem left), resumes $at"
+        dlog "GitHub rate limit low ($rem left) - polling paused until $at (runners keep running)"
+        return 1
+    fi
+    return 0
+}
+
+# ---- Sleep/wake guard (S1) ----------------------------------------------------
+# A wall-clock jump between ticks means the machine slept (or the process
+# was stopped). After waking, runners reconnect slowly and GitHub shows
+# them offline for a while, so recycling them would only add churn.
+note_tick_time() {
+    local now prev
+    now=$(date +%s)
+    prev=$(cat "$PID_DIR/tick.ts" 2>/dev/null) || prev=""
+    echo "$now" > "$PID_DIR/tick.ts" 2>/dev/null || true
+    [[ "$prev" =~ ^[0-9]+$ ]] || return 0
+    if [[ $((now - prev)) -gt $((3 * REFRESH_INTERVAL)) ]]; then
+        echo "$now" > "$PID_DIR/wake.ts" 2>/dev/null || true
+        dlog "clock jumped $((now - prev))s (sleep/wake?) - GitHub health recycles paused for 2 min"
+    fi
+    return 0
+}
+
+# True within 120 s of a detected wake
+recently_woke() {
+    local w
+    w=$(cat "$PID_DIR/wake.ts" 2>/dev/null) || return 1
+    [[ "$w" =~ ^[0-9]+$ ]] || return 1
+    [[ $(( $(date +%s) - w )) -lt 120 ]]
+}
+
 # Cross-check local state against GitHub: a runner process can be alive
 # while GitHub considers it offline (wedged listener, revoked credentials,
 # network partition that never recovered). Two consecutive offline sightings
 # → recycle the process. Skipped entirely when the API is unreachable so a
 # GitHub/network outage doesn't trigger mass restarts.
 check_github_health() {
-    local t endpoint rows online id name gbusy cnt now started polled=0
+    local t endpoint rows online id name gbusy cnt now started polled=0 n=0 woke=0
     now=$(date +%s)
+    mkdir -p "$PID_DIR" 2>/dev/null || true
+
+    for t in $(known_targets); do
+        [[ -n "$(runner_ids_for_target "$t")" ]] && n=$((n + 1))
+    done
+    HEALTH_N_TARGETS=$n
+    # Budget: one listing per target, plus the label lookups autoscale may
+    # make (up to 11 per repo). Paused polls leave runners and their
+    # markers alone; the markers expire by themselves (gh_data_fresh).
+    gh_rate_ok $(( n * (1 + AUTOSCALE * 11) )) || return 0
 
     # A broken token is re-probed once per poll, so the state recovers by
     # itself after `gh auth login` (the probe is skipped while things work)
     [[ "$(gh_state)" == "ok" ]] || gh_auth_probe quiet || true
+    recently_woke && woke=1
 
     for t in $(known_targets); do
         [[ -n "$(runner_ids_for_target "$t")" ]] || continue
@@ -2533,6 +2617,11 @@ check_github_health() {
             started=$(cat "$PID_DIR/runner-$id.laststart" 2>/dev/null || echo 0)
             [[ "$started" =~ ^[0-9]+$ ]] || started=0
             [[ $((now - started)) -lt 120 ]] && continue
+            # Never recycle right after a wake, or a runner that is running
+            # a job by either account (the job would be killed)
+            [[ $woke -eq 1 ]] && continue
+            [[ "$gbusy" == "true" ]] && continue
+            [[ "$(log_runner_status "$id")" == running:* ]] && continue
 
             if printf '%s\n' "$online" | grep -qFx "$name"; then
                 rm -f "$off_file"
@@ -2572,7 +2661,15 @@ target_key() {
 # Last queue depth seen for a target (cached by autoscale_tick), or empty
 cached_queue_depth() {
     local q
-    q=$(cat "$PID_DIR/queue-$(target_key "$1").txt" 2>/dev/null) || q=""
+    q=$(cut -f1 "$PID_DIR/queue-$(target_key "$1").txt" 2>/dev/null) || q=""
+    [[ "$q" =~ ^[0-9]+$ ]] && echo "$q"
+    return 0
+}
+
+# Last count of queued jobs no runner here could take (labels), or empty
+cached_queue_unsatisfiable() {
+    local q
+    q=$(cut -s -f2 "$PID_DIR/queue-$(target_key "$1").txt" 2>/dev/null) || q=""
     [[ "$q" =~ ^[0-9]+$ ]] && echo "$q"
     return 0
 }
@@ -2609,13 +2706,60 @@ autoscale_decide() {
 # Queue depth for a target. Repos: queued workflow runs (one API call).
 # Orgs: listing every repo's runs is too expensive, so the signal is "all
 # of our runners are busy" (= 1). Returns 1 when the API call fails.
+# Labels a job's runs-on may name and this host's runners carry: the
+# implicit self-hosted / OS / arch labels plus the detected ones. Lowercase,
+# space-separated.
+fleet_labels() {
+    local l os arch
+    l=${CACHED_LABELS:-}
+    [[ -n "$l" ]] || l=$(detect_labels 2>/dev/null || true)
+    case "$RUNNER_OS" in osx) os=macos ;; *) os=${RUNNER_OS:-} ;; esac
+    arch=${RUNNER_ARCH:-}
+    lower "self-hosted $os $arch ${l//,/ }"
+}
+
+# label_satisfiable "a,b,c" "fleet labels" - pure: every label of the job
+# is one the fleet has (case-insensitive)
+label_satisfiable() {
+    local want rest lab
+    want=$(lower "$1")
+    rest=$want
+    while [[ -n "$rest" ]]; do
+        lab=${rest%%,*}
+        if [[ "$rest" == *,* ]]; then rest=${rest#*,}; else rest=""; fi
+        lab=${lab# }; lab=${lab% }
+        [[ -n "$lab" ]] || continue
+        case " $2 " in *" $lab "*) ;; *) return 1 ;; esac
+    done
+    return 0
+}
+
+# target_queue_depth URL CUR BUSY - queued jobs this host could run.
+# Repos: the queued runs' queued jobs whose labels the fleet satisfies
+# (S5); the rest are counted as unsatisfiable into $PID_DIR/.qunsat.$$
+# for the caller. Orgs: no queue API for org runners, so "all busy" = 1.
 target_queue_depth() {
-    local url=$1 cur=$2 busy=$3 q
+    local url=$1 cur=$2 busy=$3 p ids id jobs line sat=0 unsat=0 n=0 fleet
+    rm -f "$PID_DIR/.qunsat.$$"
     if [[ "$(target_type "$url")" == "repo" ]]; then
-        q=$(gh_api "repos/${url#https://github.com/}/actions/runs?status=queued&per_page=1" \
-            --jq '.total_count') || { gh_last_load; target_set_error "$url" "$GH_CLASS" "$GH_MSG"; return 1; }
-        [[ "$q" =~ ^[0-9]+$ ]] || return 1
-        echo "$q"
+        p=${url#https://github.com/}
+        ids=$(gh_api "repos/$p/actions/runs?status=queued&per_page=20" \
+            --jq '.workflow_runs[].id') || { gh_last_load; target_set_error "$url" "$GH_CLASS" "$GH_MSG"; return 1; }
+        fleet=$(fleet_labels)
+        for id in $ids; do
+            [[ "$id" =~ ^[0-9]+$ ]] || continue
+            n=$((n + 1))
+            [[ $n -le 10 ]] || break
+            jobs=$(gh_api "repos/$p/actions/runs/$id/jobs" \
+                --jq '.jobs[] | select(.status=="queued") | (.labels | join(","))') \
+                || { gh_last_load; target_set_error "$url" "$GH_CLASS" "$GH_MSG"; return 1; }
+            while IFS= read -r line; do
+                [[ -n "$line" ]] || continue
+                if label_satisfiable "$line" "$fleet"; then sat=$((sat + 1)); else unsat=$((unsat + 1)); fi
+            done <<< "$jobs"
+        done
+        echo "$unsat" > "$PID_DIR/.qunsat.$$" 2>/dev/null || true
+        echo "$sat"
     elif [[ $cur -gt 0 && $busy -ge $cur ]]; then
         echo 1
     else
@@ -2672,7 +2816,9 @@ autoscale_tick() {
 
         key=$(target_key "$t")
         queued=$(target_queue_depth "$t" "$cur" "$busy") || continue
-        echo "$queued" > "$PID_DIR/queue-$key.txt"
+        # satisfiable<TAB>unsatisfiable (the second empty for orgs)
+        printf '%s\t%s\n' "$queued" "$(cat "$PID_DIR/.qunsat.$$" 2>/dev/null || true)" > "$PID_DIR/queue-$key.txt"
+        rm -f "$PID_DIR/.qunsat.$$"
 
         idle=$((cur - busy))
         if [[ $idle -gt 0 ]]; then
@@ -3474,15 +3620,16 @@ dashboard_discard() {
 # force a poll on the next tick.
 supervisor_tick() {
     [[ "$DAEMON_MODE" == "1" ]] && config_reload_if_changed
+    note_tick_time
     supervise_runners || true
     # --poll from another process: poll GitHub on this tick
     if [[ -f "$PID_DIR/poll.request" ]]; then
         rm -f "$PID_DIR/poll.request"
-        [[ "$GH_HEALTH_TICKS" -gt 0 ]] && SUPERVISOR_TICK=$((GH_HEALTH_TICKS - 1))
+        [[ "$GH_HEALTH_TICKS" -gt 0 ]] && SUPERVISOR_TICK=$(( $(effective_health_ticks "$HEALTH_N_TARGETS") - 1 ))
     fi
     if [[ "$GH_HEALTH_TICKS" -gt 0 ]]; then
         SUPERVISOR_TICK=$((SUPERVISOR_TICK + 1))
-        if [[ $SUPERVISOR_TICK -ge $GH_HEALTH_TICKS ]]; then
+        if [[ $SUPERVISOR_TICK -ge $(effective_health_ticks "$HEALTH_N_TARGETS") ]]; then
             SUPERVISOR_TICK=0
             check_github_health || true
         fi
@@ -3943,9 +4090,7 @@ status_collect() {
         P_MIN[n]=""; P_MAX[n]=""
         [[ -n "$b" ]] && { P_MIN[n]=${b% *}; P_MAX[n]=${b#* }; }
         P_QUEUED[n]=$(cached_queue_depth "$t")
-        q=$(cut -s -f2 "$PID_DIR/queue-$key.txt" 2>/dev/null) || q=""
-        [[ "$q" =~ ^[0-9]+$ ]] || q=""
-        P_UNSAT[n]=$q
+        P_UNSAT[n]=$(cached_queue_unsatisfiable "$t")
         P_ERRC[n]=""; P_ERRM[n]=""; P_ERRS[n]=""
         e=$(cat "$(target_err_file "$t")" 2>/dev/null) || e=""
         if [[ -n "$e" ]]; then

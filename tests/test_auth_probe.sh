@@ -75,5 +75,6 @@ autoscale_tick() { :; }
 check_github_health
 t_eq "1" "$PROBES" "check_github_health re-probes when gh_state != ok"
 rm -f "$PID_DIR/gh.err"; echo ok > "$PID_DIR/gh.state"
+gh() { case "$*" in *rate_limit*) printf '5000\t1\n' ;; *) echo '{}' ;; esac; }
 check_github_health
 t_eq "1" "$PROBES" "check_github_health skips the probe when gh_state = ok"

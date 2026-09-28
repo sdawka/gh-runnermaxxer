@@ -105,7 +105,7 @@ make_runner_dir 2 "$URL"
 touch "$PID_DIR/runner-2.ghseen" "$PID_DIR/runner-2.ghbusy"
 
 is_running() { [[ "$1" == "1" || "$1" == "2" ]]; }
-gh() { printf 'runner-1\tonline\ttrue\n'; }
+gh() { case "$*" in *rate_limit*) printf '4000\t0\n' ;; *) printf 'runner-1\tonline\ttrue\n' ;; esac; }
 
 check_github_health
 
@@ -114,3 +114,31 @@ t_ok ".ghbusy is written when gh reports busy=true" bash -c '[[ -f "'"$PID_DIR"'
 t_ok "gh-poll.ts is written after a successful poll" bash -c '[[ -f "'"$PID_DIR"'/gh-poll.ts" ]]'
 t_fail_ok "a runner missing from the gh response loses its .ghseen marker" bash -c '[[ -f "'"$PID_DIR"'/runner-2.ghseen" ]]'
 t_fail_ok "a runner missing from the gh response loses its .ghbusy marker" bash -c '[[ -f "'"$PID_DIR"'/runner-2.ghbusy" ]]'
+t_eq "4000" "$(cut -f1 "$PID_DIR/gh.rate")" "the poll records the remaining rate limit in gh.rate"
+
+# ----------------------------------------------------------------------------
+# Rate limit: too little budget left -> no listing calls, runners untouched
+# ----------------------------------------------------------------------------
+CALLS="$TEST_TMP_DIR/gh.calls"
+: > "$CALLS"
+RESET=$(( $(date +%s) + 600 ))
+gh() { echo "$*" >> "$CALLS"; case "$*" in *rate_limit*) printf '3\t%s\n' "$RESET" ;; *) printf 'runner-1\tonline\tfalse\n' ;; esac; }
+dlog() { :; }
+touch "$PID_DIR/runner-1.ghbusy"
+check_github_health
+t_eq "0" "$(grep -vc rate_limit "$CALLS")" "remaining 3: no runner listing is fetched"
+t_eq "ratelimit" "$(gh_state)" "gh state becomes ratelimit"
+case "$(cut -f3 "$PID_DIR/gh.err")" in *"resumes"*) t_eq 1 1 "the message says when polling resumes" ;; *) t_eq "...resumes..." "$(cut -f3 "$PID_DIR/gh.err")" "the message says when polling resumes" ;; esac
+t_ok "markers are left alone" test -f "$PID_DIR/runner-1.ghbusy"
+: > "$CALLS"
+check_github_health
+t_eq "0" "$(wc -l < "$CALLS" | tr -d ' ')" "until the reset time, not even rate_limit is called"
+echo "3	$(( $(date +%s) - 1 ))	0" > "$PID_DIR/gh.rate"
+gh() { echo "$*" >> "$CALLS"; case "$*" in *rate_limit*) printf '4000\t0\n' ;; *) printf 'runner-1\tonline\tfalse\n' ;; esac; }
+check_github_health
+t_ok "after the reset the poll runs again" grep -q 'actions/runners' "$CALLS"
+t_eq "ok" "$(gh_state)" "and the ratelimit state clears"
+
+# effective_health_ticks: GH_HEALTH_TICKS * max(1, ceil(N/10))
+GH_HEALTH_TICKS=12
+t_eq "12 12 12 24 48" "$(effective_health_ticks 0) $(effective_health_ticks 1) $(effective_health_ticks 10) $(effective_health_ticks 11) $(effective_health_ticks 35)" "effective_health_ticks for 0, 1, 10, 11, 35 targets"

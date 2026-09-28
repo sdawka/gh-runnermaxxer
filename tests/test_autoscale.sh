@@ -85,7 +85,24 @@ make_runner_dir 2 "https://github.com/fixed/repo"
 
 SCALE_CALLS=""
 scale_target() { SCALE_CALLS="$SCALE_CALLS $(target_key "$1")=$2"; return 0; }
-gh() { echo 3; }                       # 3 queued runs for any repo
+# Queue stub: GH_QUEUED_JOBS lines of labels, one per queued job, spread
+# over one run each (the jobs endpoint prints one line per call)
+CACHED_LABELS="macos arm64 apple-silicon"
+RUNNER_OS=osx; RUNNER_ARCH=arm64
+queue_stub() {
+    # queue_stub "labels" "labels" ... -> gh() serving that queue
+    QUEUE_JOBS=("$@")
+    gh() {
+        local i a="$*"
+        case "$*" in
+            *"runs?status=queued"*) for ((i = 0; i < ${#QUEUE_JOBS[@]}; i++)); do echo $((100 + i)); done ;;
+            *"/runs/"*"/jobs"*) i=${a#*runs/}; i=${i%%/*}; echo "${QUEUE_JOBS[$((i - 100))]}" ;;
+            *) return 1 ;;
+        esac
+    }
+}
+# 3 queued jobs, 2 of which this host can take (the GPU one it can't)
+queue_stub "self-hosted,macOS,ARM64" "self-hosted,macos,arm64" "self-hosted,linux,gpu"
 is_running() { return 0; }             # every runner has a live process
 is_busy() { return 0; }                # every runner busy
 gh_data_fresh() { return 0; }
@@ -100,12 +117,14 @@ DLOG_LINE=""
 out=$(autoscale_tick)
 t_eq "" "$out" "autoscale_tick prints nothing"
 autoscale_tick
-t_eq " auto+repo=4" "$SCALE_CALLS" "scales only the bounded project, by the queue depth"
-t_eq "3" "$(cat "$PID_DIR/queue-auto+repo.txt")" "queue depth cached per target"
+t_eq " auto+repo=3" "$SCALE_CALLS" "scales only the bounded project, by the satisfiable queue depth"
+t_eq "2	1" "$(cat "$PID_DIR/queue-auto+repo.txt")" "queue cached per target as satisfiable<TAB>unsatisfiable"
+t_eq "2" "$(cached_queue_depth https://github.com/auto/repo)" "cached_queue_depth reads the satisfiable count"
+t_eq "1" "$(cached_queue_unsatisfiable https://github.com/auto/repo)" "cached_queue_unsatisfiable reads the rest"
 t_eq "" "$(cached_queue_depth https://github.com/fixed/repo)" "no queue cached for an unbounded project"
 case "$(cat "$PID_DIR/autoscale.last")" in
-    *"auto/repo 1 → 4 (3 queued)") t_eq 1 1 "autoscale.last records the change" ;;
-    *) t_eq "... auto/repo 1 → 4 (3 queued)" "$(cat "$PID_DIR/autoscale.last")" "autoscale.last records the change" ;;
+    *"auto/repo 1 → 3 (2 queued)") t_eq 1 1 "autoscale.last records the change" ;;
+    *) t_eq "... auto/repo 1 → 3 (2 queued)" "$(cat "$PID_DIR/autoscale.last")" "autoscale.last records the change" ;;
 esac
 t_eq "$(cat "$PID_DIR/autoscale.last")" "$DLOG_LINE" "dlog receives the same line"
 
@@ -134,7 +153,7 @@ cat > "$TARGETS_FILE" << 'EOF'
 auto/repo min=1 max=5
 EOF
 make_runner_dir 3 "https://github.com/auto/repo"
-gh() { echo 0; }
+queue_stub
 is_busy() { return 1; }
 SCALE_CALLS=""
 rm -f "$PID_DIR/idle-since-auto+repo"
@@ -156,12 +175,27 @@ fixed/repo
 EOF
 rm -rf "$RUNNER_BASE_DIR"/runner-3
 MAX_RUNNERS=3
-gh() { echo 5; }
+queue_stub a,macos a,macos a,macos a,macos a,macos
+CACHED_LABELS="macos a"
 is_busy() { return 0; }
 SCALE_CALLS=""
 autoscale_tick
 t_eq " auto+repo=2" "$SCALE_CALLS" "growth limited so the total stays within MAX_RUNNERS"
 MAX_RUNNERS=20
+
+CACHED_LABELS="macos arm64 apple-silicon"
+
+# label_satisfiable / fleet_labels
+FLEET=$(fleet_labels)
+t_eq "self-hosted macos arm64 macos arm64 apple-silicon" "$FLEET" "fleet_labels: implicit + detected, lowercase"
+t_ok "labels satisfied case-insensitively" label_satisfiable "Self-Hosted,macOS,ARM64" "$FLEET"
+t_fail_ok "a label the fleet lacks is unsatisfiable" label_satisfiable "self-hosted,gpu" "$FLEET"
+t_ok "a job with no labels is satisfiable" label_satisfiable "" "$FLEET"
+t_ok "a custom label the host detected counts" label_satisfiable "apple-silicon" "$FLEET"
+
+# At most 10 runs are inspected
+queue_stub macos macos macos macos macos macos macos macos macos macos macos macos
+t_eq "10" "$(target_queue_depth https://github.com/auto/repo 1 1)" "target_queue_depth looks at no more than 10 runs"
 
 # Org targets: pressure of 1 when all of our runners are busy
 t_eq "1" "$(target_queue_depth https://github.com/myorg 2 2)" "org: all busy counts as 1 queued"
@@ -169,7 +203,7 @@ t_eq "0" "$(target_queue_depth https://github.com/myorg 2 1)" "org: an idle runn
 t_eq "0" "$(target_queue_depth https://github.com/myorg 0 0)" "org: no runners means no signal"
 
 # Dashboard/menu tag
-echo 3 > "$PID_DIR/queue-auto+repo.txt"
+printf '3\t0\n' > "$PID_DIR/queue-auto+repo.txt"
 tag=$(autoscale_tag https://github.com/auto/repo queue)
 case "$tag" in *"auto 1-10"*"queued: 3"*) t_eq 1 1 "autoscale_tag shows bounds and queue" ;; *) t_eq "auto 1-10 ... queued: 3" "$tag" "autoscale_tag shows bounds and queue" ;; esac
 t_eq "" "$(autoscale_tag https://github.com/fixed/repo queue)" "autoscale_tag is empty for an unbounded project with no queue"
