@@ -32,6 +32,8 @@ REFRESH_INTERVAL="${REFRESH_INTERVAL:-5}"
 MAX_RESTART_ATTEMPTS="${MAX_RESTART_ATTEMPTS:-5}"
 MAX_LOG_SIZE_MB="${MAX_LOG_SIZE_MB:-10}"
 GH_HEALTH_TICKS="${GH_HEALTH_TICKS:-12}"   # GitHub-side health check every N refresh ticks (0 = off)
+SHARED_TOOL_CACHE="${SHARED_TOOL_CACHE:-1}"  # 1 = all runners share $RUNNER_BASE_DIR/.toolcache
+EPHEMERAL_RUNNERS="${EPHEMERAL_RUNNERS:-0}"  # 1 = register new runners with --ephemeral (one job each)
 
 PID_DIR="$RUNNER_BASE_DIR/.pids"
 LOG_DIR="$RUNNER_BASE_DIR/.logs"
@@ -362,6 +364,13 @@ validate_config() {
         errors[${#errors[@]}]="Use only letters, numbers, underscores, and hyphens"
     fi
 
+    if [[ ! "$SHARED_TOOL_CACHE" =~ ^[01]$ ]]; then
+        errors[${#errors[@]}]="SHARED_TOOL_CACHE must be 0 or 1, got: $SHARED_TOOL_CACHE"
+    fi
+    if [[ ! "$EPHEMERAL_RUNNERS" =~ ^[01]$ ]]; then
+        errors[${#errors[@]}]="EPHEMERAL_RUNNERS must be 0 or 1, got: $EPHEMERAL_RUNNERS"
+    fi
+
     if [[ ${#warnings[@]} -gt 0 ]]; then
         local warning
         for warning in "${warnings[@]}"; do
@@ -391,6 +400,8 @@ REFRESH_INTERVAL="$REFRESH_INTERVAL"
 MAX_RESTART_ATTEMPTS="$MAX_RESTART_ATTEMPTS"
 MAX_LOG_SIZE_MB="$MAX_LOG_SIZE_MB"
 GH_HEALTH_TICKS="$GH_HEALTH_TICKS"
+SHARED_TOOL_CACHE="$SHARED_TOOL_CACHE"
+EPHEMERAL_RUNNERS="$EPHEMERAL_RUNNERS"
 EOF
     mv "$tmp" "$CONFIG_FILE"
     [[ "${1:-}" == "quiet" ]] || echo -e "  ${GREEN}Configuration saved${NC}"
@@ -580,10 +591,13 @@ remove_target_from_file() {
     mv "$tmp" "$TARGETS_FILE"
 }
 
-# URL a runner is registered to, from its .runner state file
+# URL a runner is registered to, from its .runner state file. Falls back
+# to the target saved at setup (runner-N.target) when .runner is absent,
+# e.g. an ephemeral runner between jobs.
 runner_registered_url() {
     local u
     u=$(sed -n 's/.*"gitHubUrl": *"\([^"]*\)".*/\1/p' "$RUNNER_BASE_DIR/runner-$1/.runner" 2>/dev/null | head -1) || u=""
+    [[ -z "$u" ]] && { u=$(cat "$PID_DIR/runner-$1.target" 2>/dev/null) || u=""; }
     [[ -n "$u" ]] && normalize_url "$u"
     return 0
 }
@@ -1195,6 +1209,8 @@ get_pat() {
 #   runner-N.quarantined  crash-looped too many times; needs manual start
 #   runner-N.lasterr      last failure reason (shown in UI)
 #   runner-N.ghoffline    consecutive "GitHub sees it offline" check count
+#   runner-N.target       target URL it was set up for (survives .runner deletion)
+#   runner-N.ephemeral    registered with --ephemeral (re-registers after each job)
 
 get_runner_ids() {
     local d
@@ -1247,6 +1263,24 @@ is_quarantined() {
     [[ -f "$PID_DIR/runner-$1.quarantined" ]]
 }
 
+# Registration mode is fixed at setup time: changing EPHEMERAL_RUNNERS
+# later does not affect runners that already exist.
+is_ephemeral() {
+    [[ -f "$PID_DIR/runner-$1.ephemeral" ]]
+}
+
+# An ephemeral runner that exited after finishing its one job: the runner
+# deleted .runner itself, and the log's newest job-completed line is newer
+# than our last re-registration attempt. That exit is normal, not a crash.
+ephemeral_job_finished() {
+    local id=$1 last
+    is_ephemeral "$id" || return 1
+    [[ -f "$RUNNER_BASE_DIR/runner-$id/.runner" ]] && return 1
+    last=$(tail -200 "$LOG_DIR/runner-$id.log" 2>/dev/null \
+        | grep -E 'completed with result|\[runnermaxxer\] re-registering' | tail -1) || last=""
+    [[ "$last" == *"completed with result"* ]]
+}
+
 # The name a runner is actually registered under on GitHub. Read from its
 # .runner state file so a later prefix change doesn't make us misidentify
 # runners registered under the old prefix.
@@ -1277,7 +1311,9 @@ clear_runner_state() {
     clear_failure_state "$1"
     rm -f "$PID_DIR/runner-$1.pid" \
           "$PID_DIR/runner-$1.stopped" \
-          "$PID_DIR/runner-$1.laststart"
+          "$PID_DIR/runner-$1.laststart" \
+          "$PID_DIR/runner-$1.target" \
+          "$PID_DIR/runner-$1.ephemeral"
 }
 
 # After a manager crash/restart, PID files may be stale while runner
@@ -1397,6 +1433,14 @@ supervise_runners() {
 
         is_quarantined "$id" && continue
 
+        # Ephemeral runner done with its job: re-register and relaunch now,
+        # without counting it as a crash or applying backoff.
+        if ephemeral_job_finished "$id"; then
+            rm -f "$PID_DIR/runner-$id.failcount"
+            start_runner "$id" >/dev/null 2>&1 || true
+            continue
+        fi
+
         local fails last delay
         fails=$(cat "$PID_DIR/runner-$id.failcount" 2>/dev/null || echo 0)
         [[ "$fails" =~ ^[0-9]+$ ]] || fails=0
@@ -1486,6 +1530,7 @@ setup_runner() {
     fi
 
     [[ -z "$target_url" ]] && { warn "setup_runner: no target given for runner-$id"; return 1; }
+    rm -f "$PID_DIR/runner-$id.target" "$PID_DIR/runner-$id.ephemeral"
 
     local disk_mb
     disk_mb=$(free_disk_mb)
@@ -1518,6 +1563,7 @@ setup_runner() {
     if [[ -n "$labels_str" ]]; then
         config_args+=(--labels "${labels_str// /,}")
     fi
+    [[ "$EPHEMERAL_RUNNERS" == "1" ]] && config_args+=(--ephemeral)
 
     local config_output
     if ! config_output=$(cd "$runner_dir" && ./config.sh "${config_args[@]}" 2>&1); then
@@ -1537,6 +1583,62 @@ setup_runner() {
         return 1
     fi
 
+    # Remember the target (and registration mode) outside .runner, which an
+    # ephemeral runner deletes after its job.
+    echo "$target_url" > "$PID_DIR/runner-$id.target"
+    [[ "$EPHEMERAL_RUNNERS" == "1" ]] && touch "$PID_DIR/runner-$id.ephemeral"
+    return 0
+}
+
+# Re-register an ephemeral runner in its existing directory (no
+# re-extraction). After its one job the runner deletes .runner/.credentials
+# and GitHub drops the registration, so every relaunch needs config.sh again.
+reconfigure_runner() {
+    local id=$1
+    local runner_dir="$RUNNER_BASE_DIR/runner-$id"
+    local log_file="$LOG_DIR/runner-$id.log"
+    local target_url pat labels_str config_output
+
+    [[ -f "$runner_dir/.runner" ]] && return 0
+    target_url=$(cat "$PID_DIR/runner-$id.target" 2>/dev/null) || target_url=""
+    [[ -n "$target_url" ]] || { set_lasterr "$id" "not configured (no saved target)"; return 1; }
+    [[ -x "$runner_dir/config.sh" ]] || { set_lasterr "$id" "config.sh not found/executable"; return 1; }
+    pat=$(get_pat) || { set_lasterr "$id" "re-register failed: no gh token"; return 1; }
+
+    # Marker line: lets ephemeral_job_finished tell a finished job from a
+    # failed re-registration (so the latter still counts as a crash)
+    echo "[runnermaxxer] re-registering ephemeral runner-$id ($(date '+%Y-%m-%d %H:%M:%S'))" >> "$log_file" 2>/dev/null || true
+
+    labels_str="${CACHED_LABELS:-}"
+    [[ -z "$labels_str" ]] && labels_str=$(detect_labels)
+    local config_args=(
+        --unattended
+        --name "${RUNNER_NAME_PREFIX}-${id}"
+        --url "$target_url"
+        --pat "$pat"
+        --replace
+        --ephemeral
+    )
+    [[ -n "$labels_str" ]] && config_args+=(--labels "${labels_str// /,}")
+
+    if ! config_output=$(cd "$runner_dir" && ./config.sh "${config_args[@]}" 2>&1); then
+        printf '%s\n' "$config_output" >> "$log_file" 2>/dev/null || true
+        set_lasterr "$id" "re-register failed (view logs with 'l')"
+        return 1
+    fi
+    return 0
+}
+
+# Environment for a runner launch (called inside the launch subshell)
+runner_env() {
+    if [[ "$SHARED_TOOL_CACHE" == "1" ]]; then
+        local cache="$RUNNER_BASE_DIR/.toolcache"
+        mkdir -p "$cache" 2>/dev/null || true
+        # The runner resolves its tool directory from RUNNER_TOOL_CACHE,
+        # then RUNNER_TOOLSDIRECTORY, then AGENT_TOOLSDIRECTORY; the
+        # toolkit's tool-cache reads RUNNER_TOOL_CACHE. Set both common ones.
+        export RUNNER_TOOL_CACHE="$cache" AGENT_TOOLSDIRECTORY="$cache"
+    fi
     return 0
 }
 
@@ -1562,6 +1664,9 @@ start_runner() {
     fi
 
     [[ ! -d "$runner_dir" ]] && { set_lasterr "$id" "runner directory missing"; warn "Runner directory not found"; return 1; }
+    if [[ ! -f "$runner_dir/.runner" ]] && is_ephemeral "$id"; then
+        reconfigure_runner "$id" || { warn "runner-$id: $(get_lasterr "$id")"; return 1; }
+    fi
     [[ ! -f "$runner_dir/.runner" ]] && { set_lasterr "$id" "not configured (incomplete setup)"; warn "runner-$id is not configured"; return 1; }
     [[ ! -x "$runner_dir/run.sh" ]] && { set_lasterr "$id" "run.sh not found/executable"; warn "run.sh not found/executable"; return 1; }
 
@@ -1573,9 +1678,9 @@ start_runner() {
     # setsid (where available) detaches it into its own session.
     local pid
     if command -v setsid >/dev/null 2>&1; then
-        ( cd "$runner_dir" && exec setsid nohup "$runner_dir/run.sh" >> "$log_file" 2>&1 < /dev/null ) &
+        ( cd "$runner_dir" && runner_env && exec setsid nohup "$runner_dir/run.sh" >> "$log_file" 2>&1 < /dev/null ) &
     else
-        ( cd "$runner_dir" && exec nohup "$runner_dir/run.sh" >> "$log_file" 2>&1 < /dev/null ) &
+        ( cd "$runner_dir" && runner_env && exec nohup "$runner_dir/run.sh" >> "$log_file" 2>&1 < /dev/null ) &
     fi
     pid=$!
     echo "$pid" > "$pid_file"
@@ -1634,6 +1739,14 @@ stop_runner() {
     stop_runner_procs "$id"
 }
 
+# True when GitHub answers and does not list runner NAME under TARGET_URL
+runner_gone_from_github() {
+    local url=$1 name=$2 names
+    [[ -n "$url" ]] || return 1
+    names=$(gh api --paginate "$(target_api_endpoint "$url")" --jq '.runners[].name' 2>/dev/null) || return 1
+    ! grep -qFx -- "$name" <<< "$names"
+}
+
 remove_runner() {
     local id=$1
     local runner_dir="$RUNNER_BASE_DIR/runner-$id"
@@ -1650,6 +1763,13 @@ remove_runner() {
                 if (cd "$runner_dir" && ./config.sh remove --pat "$pat" >/dev/null 2>&1); then
                     unregistered=1
                 fi
+            fi
+            # An ephemeral runner's registration may already be gone
+            # (GitHub deletes it after the job), so config.sh remove fails;
+            # only record an orphan if GitHub still lists the runner.
+            if [[ "$unregistered" != "1" ]] && is_ephemeral "$id" \
+                && runner_gone_from_github "$(runner_registered_url "$id")" "$reg_name"; then
+                unregistered=1
             fi
             if [[ "$unregistered" != "1" ]]; then
                 warn "Failed to unregister $reg_name from GitHub"
@@ -1669,7 +1789,9 @@ remove_runner() {
 # ============================================================================
 
 render_runner_line() {
-    local id=$1
+    local id=$1 eph=""
+    # Ephemeral runners exit and re-register after every job
+    is_ephemeral "$id" && eph=" ${DIM}ephemeral${NC}"
     if is_running "$id"; then
         local pid status status_color
         pid=$(cat "$PID_DIR/runner-$id.pid" 2>/dev/null || echo "?")
@@ -1680,7 +1802,7 @@ render_runner_line() {
         [[ "$status" == "idle"* ]] && status_color="${DIM}"
         [[ "$status" == *"error"* ]] && status_color="${RED}"
 
-        echo -e "    ${GREEN}●${NC} runner-$id ${DIM}PID $pid${NC} ${status_color}[$status]${NC}"
+        echo -e "    ${GREEN}●${NC} runner-$id$eph ${DIM}PID $pid${NC} ${status_color}[$status]${NC}"
     elif is_marked_stopped "$id"; then
         echo -e "    ${RED}○${NC} runner-$id ${DIM}stopped${NC}"
     elif is_quarantined "$id"; then
@@ -1689,9 +1811,9 @@ render_runner_line() {
         local err
         err=$(get_lasterr "$id")
         if [[ -n "$err" ]]; then
-            echo -e "    ${YELLOW}◌${NC} runner-$id ${YELLOW}restarting...${NC} ${DIM}($err)${NC}"
+            echo -e "    ${YELLOW}◌${NC} runner-$id$eph ${YELLOW}restarting...${NC} ${DIM}($err)${NC}"
         else
-            echo -e "    ${YELLOW}◌${NC} runner-$id ${YELLOW}restarting...${NC}"
+            echo -e "    ${YELLOW}◌${NC} runner-$id$eph ${YELLOW}restarting...${NC}"
         fi
     fi
 }
@@ -1929,7 +2051,9 @@ edit_config() {
     echo ""
     echo -e "  ${CYAN}1${NC}) Projects & runner counts (same as 't')"
     echo -e "  ${CYAN}2${NC}) Change runner name prefix (current: $RUNNER_NAME_PREFIX)"
-    echo -e "  ${CYAN}3${NC}) Cancel"
+    echo -e "  ${CYAN}3${NC}) Toggle shared tool cache (current: $SHARED_TOOL_CACHE)"
+    echo -e "  ${CYAN}4${NC}) Toggle ephemeral runners for new runners (current: $EPHEMERAL_RUNNERS)"
+    echo -e "  ${CYAN}5${NC}) Cancel"
     echo ""
     printf '  Choice: '
     read -rsn1 choice
@@ -1951,6 +2075,16 @@ edit_config() {
                     echo -e "  ${YELLOW}Invalid prefix (letters, numbers, _, - only)${NC}"
                 fi
             fi
+            ;;
+        3)
+            if [[ "$SHARED_TOOL_CACHE" == "1" ]]; then SHARED_TOOL_CACHE=0; else SHARED_TOOL_CACHE=1; fi
+            save_config
+            echo -e "  ${DIM}Shared tool cache: $SHARED_TOOL_CACHE (takes effect as runners restart)${NC}"
+            ;;
+        4)
+            if [[ "$EPHEMERAL_RUNNERS" == "1" ]]; then EPHEMERAL_RUNNERS=0; else EPHEMERAL_RUNNERS=1; fi
+            save_config
+            echo -e "  ${DIM}Ephemeral runners: $EPHEMERAL_RUNNERS (runners added from now on; remove and re-add existing ones to switch)${NC}"
             ;;
     esac
     sleep 1
@@ -2118,6 +2252,8 @@ reconcile_state
 [[ "$MAX_LOG_SIZE_MB" =~ ^[0-9]+$ && "$MAX_LOG_SIZE_MB" -ge 1 ]] || MAX_LOG_SIZE_MB=10
 [[ "$GH_HEALTH_TICKS" =~ ^[0-9]+$ ]] || GH_HEALTH_TICKS=12
 [[ "$MAX_RUNNERS" =~ ^[0-9]+$ && "$MAX_RUNNERS" -ge 1 ]] || MAX_RUNNERS=20
+[[ "$SHARED_TOOL_CACHE" =~ ^[01]$ ]] || SHARED_TOOL_CACHE=1
+[[ "$EPHEMERAL_RUNNERS" =~ ^[01]$ ]] || EPHEMERAL_RUNNERS=0
 
 # Labels can't change while running; detect_labels shells out to
 # system_profiler etc., too slow to run every frame
