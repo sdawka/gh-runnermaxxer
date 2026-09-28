@@ -16,3 +16,6 @@ runners/
 
 # Old script (if present)
 runners.sh
+
+# Claude Code local state
+.claude/
