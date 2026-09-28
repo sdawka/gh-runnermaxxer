@@ -86,6 +86,7 @@ make_runner_dir 2 "https://github.com/fixed/repo"
 SCALE_CALLS=""
 scale_target() { SCALE_CALLS="$SCALE_CALLS $(target_key "$1")=$2"; return 0; }
 gh() { echo 3; }                       # 3 queued runs for any repo
+is_running() { return 0; }             # every runner has a live process
 is_busy() { return 0; }                # every runner busy
 gh_data_fresh() { return 0; }
 dlog() { DLOG_LINE="$1"; }

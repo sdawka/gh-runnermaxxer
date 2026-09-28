@@ -1601,6 +1601,7 @@ clear_runner_state() {
           "$PID_DIR/runner-$1.draining" \
           "$PID_DIR/runner-$1.laststart" \
           "$PID_DIR/runner-$1.target" \
+          "$PID_DIR/runner-$1.name" \
           "$PID_DIR/runner-$1.ephemeral"
 }
 
@@ -1636,12 +1637,10 @@ count_running() {
 get_runner_status() {
     local id=$1 st
     st=$(log_runner_status "$id")
-    if gh_known "$id"; then
-        if [[ -f "$PID_DIR/runner-$id.ghbusy" ]]; then
-            [[ "$st" == running:* ]] || st="busy (per GitHub)"
-        else
-            [[ "$st" == running:* ]] && st="idle"
-        fi
+    # GitHub only ever upgrades the display toward busy; a log that says
+    # running is trusted even when the (possibly stale) flag disagrees.
+    if gh_known "$id" && [[ -f "$PID_DIR/runner-$id.ghbusy" ]]; then
+        [[ "$st" == running:* ]] || st="busy (per GitHub)"
     fi
     echo "$st"
 }
@@ -1713,11 +1712,14 @@ log_runner_status() {
 
 is_busy() {
     is_running "$1" || return 1
-    if gh_known "$1"; then
-        [[ -f "$PID_DIR/runner-$1.ghbusy" ]]
-    else
-        [[ "$(log_runner_status "$1")" == running:* ]]
+    # Either source saying busy counts. The GitHub flag can be up to a poll
+    # interval stale, so a job that started since the last poll is only
+    # visible in the log; trusting the flag alone would let a scale-down
+    # kill that job.
+    if gh_known "$1" && [[ -f "$PID_DIR/runner-$1.ghbusy" ]]; then
+        return 0
     fi
+    [[ "$(log_runner_status "$1")" == running:* ]]
 }
 
 # ============================================================================
@@ -1845,6 +1847,8 @@ check_github_health() {
                 rm -f "$off_file" "$PID_DIR/runner-$id.ghseen" "$PID_DIR/runner-$id.ghbusy"
                 continue
             fi
+            # A draining runner is on its way out; never recycle it
+            is_draining "$id" && { rm -f "$off_file"; continue; }
 
             name=$(registered_name "$id")
             gbusy=$(printf '%s\n' "$rows" | awk -F'\t' -v n="$name" '$1 == n { print $3; exit }')
@@ -1988,11 +1992,17 @@ autoscale_tick() {
         # Busy flags must come from this poll (a project with no runners has
         # none to report, so it can still be brought up to its minimum)
         [[ $cur -eq 0 ]] || gh_data_fresh || continue
-        busy=0
+        # Only a running, non-busy runner is idle. Quarantined, stopped or
+        # between-jobs runners are neither idle nor busy: fold them into
+        # "busy" so they never block growth or trigger a shrink.
+        idle=0
         for id in $(runner_ids_for_target "$t"); do
             is_draining "$id" && continue
-            is_busy "$id" && busy=$((busy + 1))
+            is_running "$id" || continue
+            is_busy "$id" || idle=$((idle + 1))
         done
+        busy=$((cur - idle))
+        [[ $busy -lt 0 ]] && busy=0
 
         key=$(target_key "$t")
         queued=$(target_queue_depth "$t" "$cur" "$busy") || continue
@@ -2058,7 +2068,7 @@ setup_runner() {
     fi
 
     [[ -z "$target_url" ]] && { warn "setup_runner: no target given for runner-$id"; return 1; }
-    rm -f "$PID_DIR/runner-$id.target" "$PID_DIR/runner-$id.ephemeral"
+    rm -f "$PID_DIR/runner-$id.target" "$PID_DIR/runner-$id.ephemeral" "$PID_DIR/runner-$id.name"
 
     local disk_mb
     disk_mb=$(free_disk_mb)
@@ -2114,6 +2124,9 @@ setup_runner() {
     # Remember the target (and registration mode) outside .runner, which an
     # ephemeral runner deletes after its job.
     echo "$target_url" > "$PID_DIR/runner-$id.target"
+    # Remember the registered name so an ephemeral re-registration keeps it
+    # even if RUNNER_NAME_PREFIX changes later
+    echo "${RUNNER_NAME_PREFIX}-${id}" > "$PID_DIR/runner-$id.name"
     [[ "$EPHEMERAL_RUNNERS" == "1" ]] && touch "$PID_DIR/runner-$id.ephemeral"
     return 0
 }
@@ -2139,9 +2152,12 @@ reconfigure_runner() {
 
     labels_str="${CACHED_LABELS:-}"
     [[ -z "$labels_str" ]] && labels_str=$(detect_labels)
+    local name
+    name=$(cat "$PID_DIR/runner-$id.name" 2>/dev/null) || name=""
+    [[ -n "$name" ]] || name="${RUNNER_NAME_PREFIX}-${id}"
     local config_args=(
         --unattended
-        --name "${RUNNER_NAME_PREFIX}-${id}"
+        --name "$name"
         --url "$target_url"
         --pat "$pat"
         --replace

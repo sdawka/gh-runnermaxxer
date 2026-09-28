@@ -53,10 +53,15 @@ touch "$PID_DIR/runner-2.ghseen"
 touch "$PID_DIR/runner-2.ghbusy"
 t_ok "is_busy is true from the .ghbusy marker even though the log says idle" is_busy 2
 
-# Fresh + no busy marker -> idle even though the log says running
+# Fresh + no busy marker, but the log says running -> still busy: the flag
+# can be a poll interval stale and a job may have started since
 rm -f "$PID_DIR/runner-2.ghbusy"
 make_log 2 "2024-01-01 Running job: build"
-t_fail_ok "is_busy is false when GitHub data is fresh and no .ghbusy marker exists" is_busy 2
+t_ok "is_busy trusts a running log even when a fresh GitHub poll said not busy" is_busy 2
+
+# Fresh + no busy marker + idle log -> not busy
+make_log 2 "2024-01-01 Listening for Jobs"
+t_fail_ok "is_busy is false when GitHub says not busy and the log is idle" is_busy 2
 
 # Not known (no .ghseen) -> falls back to the log
 rm -f "$PID_DIR/runner-3.ghseen" "$PID_DIR/runner-3.ghbusy"
@@ -70,11 +75,11 @@ t_fail_ok "is_busy falls back to the log (idle) when GitHub data isn't known" is
 # get_runner_status override cases
 # ----------------------------------------------------------------------------
 
-# Log says running, GitHub says not busy -> "idle"
+# Log says running, GitHub says not busy -> the log wins (flag may be stale)
 rm -f "$PID_DIR/runner-4.ghbusy"
 touch "$PID_DIR/runner-4.ghseen"
 make_log 4 "2024-01-01 Running job: build"
-t_eq "idle" "$(get_runner_status 4)" "get_runner_status: log running + GitHub not busy => idle"
+t_eq "running: build" "$(get_runner_status 4 | sed 's/ (.*//')" "get_runner_status: log running + GitHub not busy => still running"
 
 # Log says idle, GitHub says busy -> "busy (per GitHub)"
 touch "$PID_DIR/runner-5.ghseen"
