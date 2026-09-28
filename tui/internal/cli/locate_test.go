@@ -100,6 +100,50 @@ func TestLocateSiblingOfExecutable(t *testing.T) {
 	}
 }
 
+func TestLocateParentOfExecutable(t *testing.T) {
+	// A checkout: script at the repo root, binary built in tui/.
+	root := t.TempDir()
+	script := filepath.Join(root, "runnermaxxer.sh")
+	writeExecutable(t, script)
+	t.Setenv("RUNNERMAXXER_SCRIPT", "")
+	t.Setenv("PATH", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	fakeExe := filepath.Join(root, "tui", "runnermaxxer-tui")
+	restore := executablePath
+	executablePath = func() (string, error) { return fakeExe, nil }
+	defer func() { executablePath = restore }()
+
+	got, err := Locate("")
+	if err != nil {
+		t.Fatalf("Locate: %v", err)
+	}
+	if got != script {
+		t.Errorf("Locate = %q, want parent-dir script %q", got, script)
+	}
+}
+
+func TestLocateCurrentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "runnermaxxer.sh")
+	writeExecutable(t, script)
+	t.Setenv("RUNNERMAXXER_SCRIPT", "")
+	t.Setenv("PATH", t.TempDir())
+	t.Chdir(dir)
+
+	restore := executablePath
+	executablePath = func() (string, error) { return filepath.Join(t.TempDir(), "runnermaxxer-tui"), nil }
+	defer func() { executablePath = restore }()
+
+	got, err := Locate("")
+	if err != nil {
+		t.Fatalf("Locate: %v", err)
+	}
+	if got != script {
+		t.Errorf("Locate = %q, want cwd script %q", got, script)
+	}
+}
+
 func TestLocateNotFound(t *testing.T) {
 	t.Setenv("RUNNERMAXXER_SCRIPT", "")
 	t.Setenv("PATH", t.TempDir())

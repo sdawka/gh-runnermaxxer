@@ -15,10 +15,12 @@ var candidateNames = []string{"runnermaxxer.sh", "runnermaxxer"}
 var executablePath = os.Executable
 
 // Locate finds the runnermaxxer.sh script, in order: the --script flag, the
-// RUNNERMAXXER_SCRIPT environment variable, a sibling of the running
-// binary, then PATH.
+// RUNNERMAXXER_SCRIPT environment variable, the current directory, a
+// sibling of the running binary, the binary's parent directory (a binary
+// built inside a repo checkout lives in tui/ with the script one level up),
+// then PATH.
 func Locate(flagValue string) (string, error) {
-	tried := make([]string, 0, 8)
+	tried := make([]string, 0, 12)
 
 	if flagValue != "" {
 		if fileExists(flagValue) {
@@ -34,8 +36,15 @@ func Locate(flagValue string) (string, error) {
 		tried = append(tried, env)
 	}
 
+	dirs := make([]string, 0, 3)
+	if cwd, err := os.Getwd(); err == nil {
+		dirs = append(dirs, cwd)
+	}
 	if exe, err := executablePath(); err == nil {
 		dir := filepath.Dir(exe)
+		dirs = append(dirs, dir, filepath.Dir(dir))
+	}
+	for _, dir := range dirs {
 		for _, name := range candidateNames {
 			candidate := filepath.Join(dir, name)
 			if fileExists(candidate) {
