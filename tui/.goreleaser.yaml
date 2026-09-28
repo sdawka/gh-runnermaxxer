@@ -49,7 +49,10 @@ homebrew_casks:
     repository:
       owner: sdawka
       name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+      token: '{{ envOrDefault "HOMEBREW_TAP_TOKEN" "" }}'
+    # Until the tap repo + HOMEBREW_TAP_TOKEN secret exist, generate the cask
+    # into dist/ but don't push it, so a tag release still succeeds.
+    skip_upload: '{{ if envOrDefault "HOMEBREW_TAP_TOKEN" "" }}false{{ else }}true{{ end }}'
     directory: Casks
     homepage: https://github.com/sdawka/gh-runnermaxxer
     description: GitHub Actions self-hosted runner manager with a TUI
@@ -76,3 +79,8 @@ release:
   github:
     owner: sdawka
     name: gh-runnermaxxer
+  header: |
+    Each archive contains the `runnermaxxer-tui` binary plus `runnermaxxer.sh`
+    (the bash engine the TUI drives). Run `./runnermaxxer.sh --daemon` (or
+    `--install-service`), then `runnermaxxer-tui`. The bash dashboard still
+    works as before.
