@@ -77,8 +77,9 @@ type Model struct {
 	Spinner  spinner.Model
 	Notices  []Notice
 
-	Screen Screen
-	Help   bool
+	Screen  Screen
+	Help    bool
+	Confirm *ConfirmModel
 
 	Width, Height int
 	ShowLog       bool

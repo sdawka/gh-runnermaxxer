@@ -31,6 +31,11 @@ func (m Model) renderString() string {
 
 	b.WriteString(m.renderTable(m.Width))
 
+	if m.Confirm != nil {
+		b.WriteString("\n\n")
+		b.WriteString(m.Confirm.view(m.Theme))
+	}
+
 	if footer := m.renderFooter(); footer != "" {
 		b.WriteString("\n")
 		b.WriteString(footer)

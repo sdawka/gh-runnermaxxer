@@ -41,7 +41,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Spinner, cmd = m.Spinner.Update(msg)
 		return m, cmd
 
+	case cmdStartedMsg:
+		m.Inflight[msg.key] = msg.op
+		return m, nil
+
+	case cmdResultMsg:
+		delete(m.Inflight, msg.key)
+		m.noticeFromResult(msg.res)
+		return m, nil
+
 	case tea.KeyPressMsg:
+		if m.Confirm != nil {
+			return m.handleConfirmKey(msg)
+		}
 		return m.handleKey(msg)
 	}
 	return m, nil
@@ -52,14 +64,87 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	switch action.Kind {
 	case ActionQuit:
-		// The confirm-before-quit modal (pending edits / in-flight ops,
-		// §4.5) is added in commit 8 alongside the rest of the confirm
-		// modal machinery; for now a quit with pending edits just discards
-		// them rather than losing the keypress silently.
-		if !m.Pending.Empty() {
-			m.Pending.Clear()
+		// §4.5: confirm before quitting with pending edits or in-flight ops
+		// rather than losing them silently.
+		if !m.Pending.Empty() || len(m.Inflight) > 0 {
+			m.Confirm = &ConfirmModel{
+				Title: "Discard pending changes and quit?",
+				Choices: []Choice{
+					{Key: "y", Label: "Quit", Danger: true},
+					{Key: "n", Label: "Cancel"},
+				},
+				Default: 1,
+				OnChoice: func(mm Model, choice string) (Model, tea.Cmd) {
+					if choice == "y" {
+						return mm, tea.Quit
+					}
+					return mm, nil
+				},
+			}
+			return m, nil
 		}
 		return m, tea.Quit
+
+	case ActionDrain:
+		id, ok := m.currentRunnerID()
+		if !ok {
+			m.notice("select a runner", LevelWarn)
+			return m, nil
+		}
+		return m.guardBusy(id,
+			func(mm Model) (Model, tea.Cmd) { return mm.execDrain(id) },
+			func(mm Model) (Model, tea.Cmd) { return mm.execRemove(id) },
+		)
+
+	case ActionDrainPicker:
+		return m.confirmDrainPicker()
+
+	case ActionRemoveNow:
+		id, ok := m.currentRunnerID()
+		if !ok {
+			m.notice("select a runner", LevelWarn)
+			return m, nil
+		}
+		return m.confirmRemoveNow(id)
+
+	case ActionStop:
+		id, ok := m.currentRunnerID()
+		if !ok {
+			m.notice("select a runner", LevelWarn)
+			return m, nil
+		}
+		return m.guardBusy(id,
+			func(mm Model) (Model, tea.Cmd) { return mm.execStop(id) },
+			func(mm Model) (Model, tea.Cmd) { return mm.execStop(id) },
+		)
+
+	case ActionStart:
+		id, ok := m.currentRunnerID()
+		if !ok {
+			m.notice("select a runner", LevelWarn)
+			return m, nil
+		}
+		return m.execStart(id)
+
+	case ActionRestart:
+		id, ok := m.currentRunnerID()
+		if !ok {
+			m.notice("select a runner", LevelWarn)
+			return m, nil
+		}
+		return m.guardBusy(id,
+			func(mm Model) (Model, tea.Cmd) { return mm.execRestart(id) },
+			func(mm Model) (Model, tea.Cmd) { return mm.execRestart(id) },
+		)
+
+	case ActionStopAll:
+		return m.confirmAllVariant("stop", func(mm Model) (Model, tea.Cmd) { return mm.execStopAll() })
+
+	case ActionStartAll:
+		return m.execStartAll()
+
+	case ActionRestartAll:
+		return m.confirmAllVariant("restart", func(mm Model) (Model, tea.Cmd) { return mm.execRestartAll() })
 
 	case ActionHelp:
 		m.Help = !m.Help
@@ -101,11 +186,10 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// ActionApply, ActionDrain*, ActionStop*, ActionStart*, ActionRestart*,
-	// ActionProjects, ActionAddTarget, ActionLogs, ActionDaemonLog,
-	// ActionCheckGH, ActionConfig, ActionDownload, ActionBounds and
-	// ActionRemoveFromList are handled once the screens/exec wiring that
-	// give them meaning land (commits 7-11).
+	// ActionApply (§scale application), ActionProjects, ActionAddTarget,
+	// ActionLogs, ActionDaemonLog, ActionCheckGH, ActionConfig,
+	// ActionDownload, ActionBounds and ActionRemoveFromList are handled once
+	// the screens/exec wiring that give them meaning land (commits 9-11).
 	return m, nil
 }
 
