@@ -46,6 +46,9 @@ func (m Model) renderString() string {
 	if m.Screen == ScreenBounds && m.Bounds != nil {
 		return m.Bounds.view()
 	}
+	if m.Screen == ScreenConfig && m.Config != nil {
+		return m.Config.view(m.Snap.Config)
+	}
 
 	var b strings.Builder
 

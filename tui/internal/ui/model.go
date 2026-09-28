@@ -20,10 +20,9 @@ const (
 	daemonLogID = -2
 )
 
-// Screen identifies which top-level view is active. ScreenConfig,
-// ScreenLogs (the full-screen log viewer is handled separately via
-// Model.Log) and ScreenGHStatus are added as their commits land (Go plan
-// §8, commits 12-13).
+// Screen identifies which top-level view is active. ScreenGHStatus is
+// added once its commit lands (Go plan §8, commit 13); the full-screen log
+// viewer is handled separately via Model.Log rather than as a Screen.
 type Screen int
 
 const (
@@ -31,6 +30,7 @@ const (
 	ScreenProjects
 	ScreenAddTarget
 	ScreenBounds
+	ScreenConfig
 )
 
 // Level is a Notice's severity, used to pick its style.
@@ -98,6 +98,7 @@ type Model struct {
 	formReturn Screen
 	AddTarget  *AddTargetForm
 	Bounds     *BoundsForm
+	Config     *ConfigModel
 
 	Width, Height int
 	ShowLog       bool // wide enough for a permanent side log pane, if one is open

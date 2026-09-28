@@ -102,6 +102,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleAddTargetKey(msg)
 		case ScreenBounds:
 			return m.handleBoundsKey(msg)
+		case ScreenConfig:
+			return m.handleConfigKey(msg)
 		}
 		return m.handleKey(msg)
 	}
@@ -215,6 +217,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case ActionRemoveFromList:
 		return m.removeFromList()
 
+	case ActionConfig:
+		return m.openConfigScreen()
+
 	case ActionHelp:
 		m.Help = !m.Help
 		return m, nil
@@ -281,8 +286,8 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openDaemonLog()
 	}
 
-	// ActionCheckGH, ActionConfig and ActionDownload are handled once the
-	// screens/exec wiring that give them meaning land (commits 12-13).
+	// ActionCheckGH and ActionDownload are handled once the screens/exec
+	// wiring that give them meaning land (commit 13).
 	return m, nil
 }
 
