@@ -205,6 +205,49 @@ t_ok "unit sets PATH" grep -qxF 'Environment="PATH=/usr/local/bin:/usr/bin"' <<<
 t_ok "unit restarts always" grep -qx 'Restart=always' <<< "$unit"
 t_ok "unit leaves runners alive on stop" grep -qx 'KillMode=process' <<< "$unit"
 t_ok "unit is wanted by default.target" grep -qx 'WantedBy=default.target' <<< "$unit"
+t_fail_ok "unit without a gh path sets no RUNNERMAXXER_GH" grep -q RUNNERMAXXER_GH <<< "$unit"
+t_fail_ok "plist without a gh path sets no RUNNERMAXXER_GH" grep -q RUNNERMAXXER_GH <<< "$plist"
+
+# RUNNERMAXXER_GH: the absolute gh baked into the service (A4)
+plist=$(launchd_plist "/r/runnermaxxer.sh" "/r" "/usr/bin" "/tmp/daemon.out" "/opt/homebrew/bin/gh")
+t_ok "plist sets RUNNERMAXXER_GH" grep -q '<key>RUNNERMAXXER_GH</key>' <<< "$plist"
+t_eq "        <string>/opt/homebrew/bin/gh</string>" "$(grep -A1 '<key>RUNNERMAXXER_GH</key>' <<< "$plist" | tail -1)" "plist RUNNERMAXXER_GH value is the gh path"
+if command -v plutil >/dev/null 2>&1; then
+    printf '%s\n' "$plist" > "$TEST_TMP_DIR/t2.plist"
+    t_ok "plutil -lint accepts the plist with RUNNERMAXXER_GH" plutil -lint -s "$TEST_TMP_DIR/t2.plist"
+fi
+unit=$(systemd_unit "/r/runnermaxxer.sh" "/r" "/usr/bin" "/x/gh")
+t_ok "unit sets RUNNERMAXXER_GH" grep -qxF 'Environment="RUNNERMAXXER_GH=/x/gh"' <<< "$unit"
+t_ok "unit still sets PATH" grep -qxF 'Environment="PATH=/usr/bin"' <<< "$unit"
+
+# wait_for_snapshot_tick / service_auth_failed_since (the smoke test's parts)
+mkdir -p "$PID_DIR"
+now=$(date +%s)
+printf '{"schema":2,"tick_ts":%s}\n' "$now" > "$PID_DIR/state.json"
+t_ok "wait_for_snapshot_tick: a tick at or after the epoch" wait_for_snapshot_tick "$now" 0
+t_fail_ok "wait_for_snapshot_tick: an older tick times out" wait_for_snapshot_tick $((now + 5)) 1
+rm -f "$PID_DIR/state.json"
+t_fail_ok "wait_for_snapshot_tick: no snapshot times out" wait_for_snapshot_tick "$now" 0
+printf 'auth\t401\tBad credentials\t%s\n' "$now" > "$PID_DIR/gh.err"
+t_ok "service_auth_failed_since: auth error after install" service_auth_failed_since "$now"
+t_fail_ok "service_auth_failed_since: an older auth error doesn't count" service_auth_failed_since $((now + 1))
+printf 'network\t\tdown\t%s\n' "$now" > "$PID_DIR/gh.err"
+t_fail_ok "service_auth_failed_since: other classes don't count" service_auth_failed_since "$now"
+rm -f "$PID_DIR/gh.err"
+
+# --scale checks access before growing a target
+(
+    SCALE_ARGS=("https://github.com/o/nope" 1)
+    MAX_RUNNERS=20
+    detect_runner_tarball() { echo /x.tar.gz; }
+    gh_auth_probe() { :; }
+    target_accessible() { GH_CLASS=notfound; gh_set_last notfound 404 "Not Found"; return 1; }
+    scale_target() { echo "SCALED $*"; }
+    rc=0; out=$(cli_scale 2>&1) || rc=$?
+    t_eq "1" "$rc" "--scale of an inaccessible target fails"
+    case "$out" in *SCALED*) t_eq "no scale" "$out" "--scale doesn't register against it" ;; *) t_eq 1 1 "--scale doesn't register against it" ;; esac
+    case "$out" in *"404"*) t_eq 1 1 "--scale explains the access error" ;; *) t_eq "...404..." "$out" "--scale explains the access error" ;; esac
+)
 
 t_eq "/h/Library/LaunchAgents/com.gh-runnermaxxer.plist" "$(HOME=/h OS_FAMILY=macos service_file_path)" "service_file_path macOS"
 t_eq "/h/.config/systemd/user/gh-runnermaxxer.service" "$(HOME=/h OS_FAMILY=linux XDG_CONFIG_HOME='' service_file_path)" "service_file_path Linux"
@@ -272,12 +315,12 @@ case "$*" in
 esac')
 run_shim() { PATH="$SHIMDIR:$PATH" run_copy "$@"; }
 
-out=$(run_shim --add-target o/r 2>&1); rc=$?
+rc=0; out=$(run_shim --add-target o/r 2>&1) || rc=$?
 t_eq "0" "$rc" "--add-target o/r -> 0"
 t_ok "--add-target prints what it added" grep -q 'added o/r' <<< "$out"
 t_ok "--add-target writes the targets file" grep -qx 'o/r' "$TARGETS_FILE"
 t_ok "a mutating verb refreshes state.json when no daemon runs" grep -q '"writer":"cli"' "$PID_DIR/state.json"
-out=$(run_shim --add-target o/gone 2>&1); rc=$?
+rc=0; out=$(run_shim --add-target o/gone 2>&1) || rc=$?
 t_eq "1" "$rc" "--add-target of a 404 -> 1"
 t_ok "the 404 is explained" grep -q '404' <<< "$out"
 t_fail_ok "a failed add doesn't touch the targets file" grep -q 'o/gone' "$TARGETS_FILE"
@@ -293,11 +336,11 @@ echo 4 > "$PID_DIR/want-o+r.txt"
 t_eq "0" "$(run_shim --remove-target o/r >/dev/null 2>&1; echo $?)" "--remove-target o/r -> 0"
 t_fail_ok "target gone from the file" grep -q 'o/r' "$TARGETS_FILE"
 t_fail_ok "its want file removed" test -e "$PID_DIR/want-o+r.txt"
-out=$(run_shim --remove-target a/b 2>&1); rc=$?
+rc=0; out=$(run_shim --remove-target a/b 2>&1) || rc=$?
 t_eq "1" "$rc" "--remove-target with runners registered to it -> 1"
 t_ok "the refusal says how to scale down" grep -q -- '--scale a/b=0' <<< "$out"
 
-out=$(run_shim --set-config MAX_RUNNERS=7 --set-config AUTOSCALE=1 2>&1); rc=$?
+rc=0; out=$(run_shim --set-config MAX_RUNNERS=7 --set-config AUTOSCALE=1 2>&1) || rc=$?
 t_eq "0" "$rc" "--set-config (repeated) -> 0"
 t_ok "config file has the new value" grep -qx 'MAX_RUNNERS="7"' "$CONFIG_FILE"
 t_ok "config file has the second value" grep -qx 'AUTOSCALE="1"' "$CONFIG_FILE"
@@ -310,7 +353,7 @@ t_ok "an out-of-range value is clamped and saved" grep -qx 'REFRESH_INTERVAL="36
 t_ok "the clamp is reported" grep -q 'clamped to 3600' <<< "$out"
 run_shim --set-config REFRESH_INTERVAL=5 >/dev/null 2>&1
 
-out=$(run_shim --auth-check 2>&1); rc=$?
+rc=0; out=$(run_shim --auth-check 2>&1) || rc=$?
 t_eq "0" "$rc" "--auth-check with a good token -> 0"
 t_ok "--auth-check prints the user" grep -q 'shimuser' <<< "$out"
 json=$(run_shim --auth-check --json 2>/dev/null)
@@ -322,7 +365,7 @@ printf '#!/bin/sh\necho "gh: Bad credentials (HTTP 401)" >&2\nexit 1\n' > "$BADD
 t_eq "1" "$(PATH="$BADDIR:$PATH" run_copy --auth-check >/dev/null 2>&1; echo $?)" "--auth-check with a rejected token -> 1"
 t_eq "auth" "$(cat "$PID_DIR/gh.state")" "and records gh.state=auth"
 
-out=$(run_shim --gh-status 2>&1); rc=$?
+rc=0; out=$(run_shim --gh-status 2>&1) || rc=$?
 t_eq "0" "$rc" "--gh-status -> 0"
 t_ok "--gh-status lists each target" grep -q 'a/b' <<< "$out"
 t_eq "0" "$(run_shim --poll >/dev/null 2>&1; echo $?)" "--poll without a daemon polls now -> 0"

@@ -218,6 +218,49 @@ disk_free_pct() {
     return 0
 }
 
+# Per-runner disk use (U6): du -sk of _work and _diag into
+# runner-N.workmb, in the background so a large _work never stalls a tick.
+# Every DISK_USAGE_TICKS ticks for all runners, and right away for a runner
+# that has no figure yet. A .pending marker keeps a slow du from being
+# started twice (stale after 10 minutes).
+DISK_USAGE_TICKS=120
+DISK_TICK=0
+DISK_LOW_WARNED=0
+disk_usage_tick() {
+    local all=0 id f d pend age now pct
+    now=$(date +%s)
+    DISK_TICK=$((DISK_TICK + 1))
+    if [[ $DISK_TICK -ge $DISK_USAGE_TICKS ]]; then all=1; DISK_TICK=0; fi
+    for id in $(get_runner_ids); do
+        f="$PID_DIR/runner-$id.workmb"; pend="$f.pending"
+        [[ $all -eq 1 || ! -f "$f" ]] || continue
+        if [[ -f "$pend" ]]; then
+            age=$(( now - $(file_mtime "$pend") ))
+            [[ $age -lt 600 ]] && continue
+        fi
+        d="$RUNNER_BASE_DIR/runner-$id"
+        : > "$pend"
+        (
+            exec >/dev/null 2>&1 </dev/null
+            mb=$(du -sk "$d/_work" "$d/_diag" 2>/dev/null | awk '{s += $1} END {print int(s / 1024)}')
+            [[ "$mb" =~ ^[0-9]+$ ]] || mb=0
+            echo "$mb" > "$f.tmp.$$.$id" && mv -f "$f.tmp.$$.$id" "$f"
+            rm -f "$pend"
+        ) &
+    done
+    # Filesystem: note once when free space drops under 15 %
+    pct=$(disk_free_pct)
+    if [[ -n "$pct" && $pct -lt 15 ]]; then
+        if [[ $DISK_LOW_WARNED -eq 0 ]]; then
+            dlog "low disk: ${pct}% free on the runners' filesystem ($(free_disk_mb) MB)"
+            DISK_LOW_WARNED=1
+        fi
+    else
+        DISK_LOW_WARNED=0
+    fi
+    return 0
+}
+
 # Whether `date` understands GNU's `-d`. Probed once and cached so hot
 # paths (status refresh) don't fork an extra process per call.
 DATE_IS_GNU=""
@@ -314,6 +357,11 @@ download_runner_tarball() {
         warn "Couldn't find the checksum in the release notes for $tag - installed without verification"
     fi
 
+    # Browsers and some download paths tag files with com.apple.quarantine,
+    # which Gatekeeper then applies to the extracted runner binaries
+    if [[ "$OS_FAMILY" == "macos" ]] && command -v xattr >/dev/null 2>&1; then
+        xattr -d com.apple.quarantine "$SCRIPT_DIR/$asset" 2>/dev/null || true
+    fi
     echo -e "${GREEN}✓${NC} Downloaded $asset"
     return 0
 }
@@ -1600,6 +1648,11 @@ preflight_checks() {
         if ! "$GH_BIN" auth status >/dev/null 2>&1; then
             echo -e "${RED}✗ gh CLI is not authenticated. Run: gh auth login${NC}" >&2
             errors=$((errors + 1))
+            # Recorded so a service install can tell "no token" apart
+            # from other startup failures
+            mkdir -p "$PID_DIR" 2>/dev/null || true
+            echo auth > "$PID_DIR/gh.state" 2>/dev/null || true
+            gh_set_last auth "" "gh auth status failed (not logged in, or the token is unreadable here)"
         else
             # Who, which scopes, and per-target permission. A missing scope
             # is recorded against the target (and shown), not fatal: other
@@ -3622,6 +3675,7 @@ supervisor_tick() {
     [[ "$DAEMON_MODE" == "1" ]] && config_reload_if_changed
     note_tick_time
     supervise_runners || true
+    disk_usage_tick || true
     # --poll from another process: poll GitHub on this tick
     if [[ -f "$PID_DIR/poll.request" ]]; then
         rm -f "$PID_DIR/poll.request"
@@ -3834,9 +3888,10 @@ service_path_value() {
 
 # launchd_plist SCRIPT WORKDIR PATH_VALUE OUT_FILE
 launchd_plist() {
-    local script workdir pathv out
+    local script workdir pathv out ghv=""
     script=$(xml_escape "$1"); workdir=$(xml_escape "$2")
     pathv=$(xml_escape "$3"); out=$(xml_escape "$4")
+    [[ -n "${5:-}" ]] && ghv=$(xml_escape "$5")
     cat << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -3854,7 +3909,7 @@ launchd_plist() {
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>$pathv</string>
+        <string>$pathv</string>$([[ -n "$ghv" ]] && printf '\n        <key>RUNNERMAXXER_GH</key>\n        <string>%s</string>' "$ghv")
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -3889,7 +3944,7 @@ Description=gh-runnermaxxer - GitHub Actions self-hosted runner pool
 Type=simple
 ExecStart="$script" --daemon
 WorkingDirectory=$(systemd_escape "$2")
-Environment="PATH=$(systemd_escape "$3")"
+Environment="PATH=$(systemd_escape "$3")"$([[ -n "${4:-}" ]] && printf '\nEnvironment="RUNNERMAXXER_GH=%s"' "$(systemd_escape "$4")")
 Restart=always
 RestartSec=10
 # Runners are detached children and must outlive daemon restarts: signal
@@ -3913,14 +3968,18 @@ install_service() {
     local script gh_bin path_val file uid pid
     script="$SCRIPT_DIR/$(basename "$0")"
     [[ -f "$CONFIG_FILE" ]] || die "No configuration found - run --setup first"
-    gh_bin=$(command -v gh 2>/dev/null) || die "gh CLI not found in PATH"
+    gh_bin=$(command -v "$GH_BIN" 2>/dev/null) || die "gh CLI not found in PATH"
+    # Absolute, so the service never depends on its PATH to find gh (A4)
+    case "$gh_bin" in /*) ;; *) gh_bin="$(cd "$(dirname "$gh_bin")" && pwd)/$(basename "$gh_bin")" ;; esac
+    local since
+    since=$(date +%s)
     path_val=$(service_path_value "$(dirname "$gh_bin")")
     file=$(service_file_path)
     mkdir -p "$LOG_DIR" "$(dirname "$file")"
 
     case "$OS_FAMILY" in
         macos)
-            launchd_plist "$script" "$SCRIPT_DIR" "$path_val" "$LOG_DIR/daemon.out" > "$file"
+            launchd_plist "$script" "$SCRIPT_DIR" "$path_val" "$LOG_DIR/daemon.out" "$gh_bin" > "$file"
             echo "Wrote $file"
             uid=$(id -u)
             if launchctl bootout "gui/$uid/$SERVICE_LABEL" >/dev/null 2>&1; then
@@ -3938,7 +3997,7 @@ install_service() {
         linux)
             command -v systemctl >/dev/null 2>&1 \
                 || die "systemctl not found - run '$script --daemon' from your init system instead"
-            systemd_unit "$script" "$SCRIPT_DIR" "$path_val" > "$file"
+            systemd_unit "$script" "$SCRIPT_DIR" "$path_val" "$gh_bin" > "$file"
             echo "Wrote $file"
             systemctl --user daemon-reload && systemctl --user enable --now "$SERVICE_UNIT" \
                 || die "systemctl --user could not start $SERVICE_UNIT"
@@ -3948,9 +4007,11 @@ install_service() {
             echo "           $script --status"
             echo "  Logs:    journalctl --user -u $SERVICE_UNIT -f"
             echo "           tail -f \"$DAEMON_LOG\""
-            echo ""
-            echo "  To keep it running while you are logged out (and start at boot):"
-            echo "    loginctl enable-linger $USER"
+            if command -v loginctl >/dev/null 2>&1 \
+                && [[ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]]; then
+                echo ""
+                warn "Lingering is off: the service stops when you log out and won't start at boot. Fix: loginctl enable-linger $USER"
+            fi
             ;;
         *)
             die "Unsupported OS for --install-service - run '$script --daemon' from your init system instead"
@@ -3958,7 +4019,75 @@ install_service() {
     esac
     if pid=$(cat "$LOCK_FILE" 2>/dev/null) && kill -0 "$pid" 2>/dev/null && [[ "$pid" != "$(daemon_pid || true)" ]]; then
         warn "The manager is open in a terminal (pid $pid); the service takes over once you quit it"
+        return 0
     fi
+    service_smoke_test "$since" "$file"
+}
+
+# wait_for_snapshot_tick EPOCH SECONDS - wait until state.json has a
+# tick_ts >= EPOCH (a supervisor tick after EPOCH). Returns 1 on timeout.
+wait_for_snapshot_tick() {
+    local since=$1 left=$2 ts
+    while true; do
+        ts=$(sed -n 's/.*"tick_ts":\([0-9][0-9]*\).*/\1/p' "$PID_DIR/state.json" 2>/dev/null | head -1) || ts=""
+        [[ "$ts" =~ ^[0-9]+$ && $ts -ge $since ]] && return 0
+        [[ $left -gt 0 ]] || return 1
+        left=$((left - 1))
+        sleep 1
+    done
+}
+
+# True when gh.err records an auth failure at or after EPOCH
+service_auth_failed_since() {
+    local e cls ts
+    e=$(cat "$PID_DIR/gh.err" 2>/dev/null) || return 1
+    cls=$(printf '%s\n' "$e" | cut -f1); ts=$(printf '%s\n' "$e" | cut -f4)
+    [[ "$cls" == "auth" && "$ts" =~ ^[0-9]+$ && $ts -ge $1 ]]
+}
+
+service_token_hint() {
+    echo -e "${RED}✗ the daemon cannot read your gh token (the keychain is not available to services).${NC}" >&2
+    echo "  Either run once:  gh auth login --insecure-storage" >&2
+    echo "  or set GH_TOKEN in the service file: $1 (stored in plain text)" >&2
+}
+
+# After install: is the daemon up, ticking, and able to use gh? A keychain
+# token that the user's shell can read is often out of reach for a
+# launchd/systemd service (S8) - say so plainly. Leaves the service
+# installed either way; returns 1 when something is wrong.
+service_smoke_test() {
+    local since=$1 file=$2 pid="" i st user
+    echo ""
+    echo "Checking the service..."
+    for ((i = 0; i < 15; i++)); do
+        pid=$(daemon_pid) && break
+        pid=""
+        sleep 1
+    done
+    if [[ -z "$pid" ]] || ! wait_for_snapshot_tick "$since" $((3 * REFRESH_INTERVAL + 10)); then
+        if service_auth_failed_since "$since"; then
+            service_token_hint "$file"
+        elif [[ -z "$pid" ]]; then
+            echo -e "${RED}✗ the daemon did not start within 15 s - see $LOG_DIR/daemon.out and $DAEMON_LOG${NC}" >&2
+        else
+            echo -e "${RED}✗ the daemon (pid $pid) is running but has not completed a tick - see $DAEMON_LOG${NC}" >&2
+        fi
+        return 1
+    fi
+    st=$(gh_state)
+    user=$(cat "$PID_DIR/gh.user" 2>/dev/null) || user=""
+    case "$st" in
+        ok)
+            echo -e "${GREEN}✓${NC} daemon running (pid $pid), gh: ok${user:+ as $user}"
+            ;;
+        auth)
+            service_token_hint "$file"
+            return 1
+            ;;
+        *)
+            echo -e "${YELLOW}⚠ daemon running (pid $pid), gh: $st - $(cat "$PID_DIR/gh.msg" 2>/dev/null || echo "see $DAEMON_LOG")${NC}"
+            ;;
+    esac
     return 0
 }
 
@@ -4224,9 +4353,14 @@ state_json() {
 # Warnings about the host, recomputed per snapshot
 STATE_WARNINGS=()
 state_warnings() {
+    local pct
     STATE_WARNINGS=()
     if [[ -s "$ORPHANS_FILE" ]]; then
         STATE_WARNINGS[${#STATE_WARNINGS[@]}]="orphaned GitHub registrations need manual cleanup (see $(basename "$ORPHANS_FILE"))"
+    fi
+    pct=$(disk_free_pct)
+    if [[ -n "$pct" && $pct -lt 15 ]]; then
+        STATE_WARNINGS[${#STATE_WARNINGS[@]}]="low disk: ${pct}% free on the runners' filesystem"
     fi
     return 0
 }
@@ -4349,6 +4483,13 @@ cli_scale() {
     fi
     for ((i = 0; i < ${#SCALE_ARGS[@]}; i += 2)); do
         url=${SCALE_ARGS[i]}; n=${SCALE_ARGS[i+1]}
+        # Like the menu: check access before registering anything
+        if [[ $n -gt $(count_runners_for_target "$url") ]] && ! target_accessible "$url"; then
+            gh_last_load
+            echo -e "${RED}Error: can't use $(target_label "$url"): $(gh_error_note "$GH_CLASS" "$GH_MSG")${NC}" >&2
+            failed=1
+            continue
+        fi
         add_target_to_file "$url"
         if [[ $(count_runners_for_target "$url") -eq $n ]]; then
             echo "  $(target_label "$url"): already at $n runner(s)"
