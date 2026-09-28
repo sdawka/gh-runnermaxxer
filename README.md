@@ -50,6 +50,8 @@ One instance manages runners for any number of repositories and organizations. A
 - **Runner tarball freshness check** - at startup, warns (once, non-fatally) if the shipped tarball is older than the latest `actions/runner` release, so you know new runners are being extracted from a stale version; the latest-release lookup is cached for 24h
 - **Multiple projects in one instance** - run runners for several repositories and organizations side by side; each runner is registered to exactly one of them and the dashboard groups runners by project
 - **Project menu at startup** - arrow-key menu listing your projects from `.runnermaxxer.targets`: ↑/↓ picks a project, ←/→ sets its runner count; `a` adds a new repo/org on the spot; Enter applies by adding or removing runners per project
+- **Headless daemon and service install** - `--daemon` supervises without a UI; `--install-service` sets it up as a launchd agent (macOS) or systemd user service (Linux)
+- **Scripting CLI** - `--status [--json]`, `--scale owner/repo=N`, `--drain/--stop/--start/--remove ID`, with meaningful exit codes
 - **Uses `gh` CLI** for authentication - no PAT management needed
 
 ## Requirements
@@ -121,7 +123,7 @@ jobs:
 
 ## Self-Healing Behavior
 
-While the TUI is open, a supervisor runs every refresh tick:
+While the TUI (or `--daemon`) is running, a supervisor runs every refresh tick:
 
 - A runner that dies unexpectedly is restarted with exponential backoff (5s, 10s, 20s, 40s, ...).
 - After `MAX_RESTART_ATTEMPTS` consecutive rapid crashes, the runner is **quarantined** (shown as `✖` with the failure reason) so it can't crash-loop forever. Press `s` (start all) or `r` to clear the quarantine and retry.
@@ -131,7 +133,7 @@ While the TUI is open, a supervisor runs every refresh tick:
 - Runner logs are truncated past `MAX_LOG_SIZE_MB` (a `.log.1` copy is kept).
 - Stale PID files (e.g. after a reboot) are detected via process-identity checks, so a recycled PID is never mistaken for a live runner or killed by accident.
 
-Runners are detached processes: quitting the manager can leave them running (you'll be asked), but they are only supervised while the TUI is open.
+Runners are detached processes: quitting the manager can leave them running (you'll be asked), but they are only supervised while the TUI or the [daemon](#running-as-a-service) is running.
 
 ## CLI Options
 
@@ -145,7 +147,73 @@ Options:
   --no-menu       Skip the project menu at startup and go straight to the dashboard
   --version, -v   Print version
   --help, -h      Show help message
+
+Headless:
+  --daemon             Supervise runners without a UI (events: runners/.logs/runnermaxxer.log)
+  --stop-daemon        Stop a running daemon (runners keep running)
+  --install-service    Run the daemon at login (launchd on macOS, systemd --user on Linux)
+  --uninstall-service  Remove that service
+
+Scripting (no UI; exit status 0 = ok, 1 = failed, 2 = bad usage):
+  --status [--json]    Projects and runners with their state
+  --scale TARGET=N     Set a project's runner count (repeatable; TARGET as for --target)
+  --drain ID           Remove runner ID once its current job finishes
+  --stop ID            Stop runner ID (stays down until --start)
+  --start ID           Start runner ID (clears quarantine)
+  --remove ID          Unregister and delete runner ID now
 ```
+
+## Running as a Service
+
+`--daemon` runs the same supervisor as the TUI (restarts, backoff, quarantine, GitHub health checks, drains) with no terminal UI. It needs a valid `.runnermaxxer.conf` (run `--setup` first; there is no onboarding in headless mode) and never shows the project menu - set runner counts with `--scale` or the TUI beforehand. Each notable event (runner started, restarted, quarantined, recycled, draining, removed, daemon start/stop) is appended as one timestamped line to `runners/.logs/runnermaxxer.log`.
+
+On SIGTERM/SIGINT the daemon exits cleanly and **leaves runners running**; the next daemon or TUI re-adopts them. `--stop-daemon` sends SIGTERM and waits up to 10s.
+
+To start it automatically at login and restart it if it dies:
+
+```bash
+./runnermaxxer.sh --install-service
+```
+
+- **macOS**: writes `~/Library/LaunchAgents/com.gh-runnermaxxer.plist` (`RunAtLoad`, `KeepAlive`, `AbandonProcessGroup` so runners outlive the daemon) and loads it with `launchctl`. `PATH` includes the directory `gh` was found in at install time. Daemon stdout/stderr go to `runners/.logs/daemon.out`.
+  - Status: `launchctl print gui/$(id -u)/com.gh-runnermaxxer`
+  - Logs: `tail -f runners/.logs/runnermaxxer.log runners/.logs/daemon.out`
+- **Linux**: writes `~/.config/systemd/user/gh-runnermaxxer.service` (`Restart=always`, `KillMode=process` so runners outlive the daemon) and runs `systemctl --user daemon-reload && systemctl --user enable --now gh-runnermaxxer.service`. User services stop when you log out unless lingering is enabled: `loginctl enable-linger $USER`.
+  - Status: `systemctl --user status gh-runnermaxxer`
+  - Logs: `journalctl --user -u gh-runnermaxxer -f` and `runners/.logs/runnermaxxer.log`
+
+`--uninstall-service` stops and removes the service (runners keep running, unsupervised). Because the service restarts the daemon, use `--uninstall-service` rather than `--stop-daemon` to stop it for good. `gh` must be authenticated for the user the service runs as (`gh auth status`).
+
+The daemon and the TUI share one lock, so only one of them supervises at a time. Opening the TUI while the daemon runs prints `a daemon is running (pid N); use --status / --scale, or stop it with --stop-daemon` and exits. If the TUI is open when the service starts, the service's daemon exits and is retried until you quit the TUI.
+
+## Scripting / CLI
+
+These commands never open the UI, print plain text when stdout is not a terminal, and exit `0` on success, `1` on failure, `2` on bad usage.
+
+```bash
+./runnermaxxer.sh --status                 # human-readable
+./runnermaxxer.sh --status --json | jq .   # machine-readable
+./runnermaxxer.sh --scale myorg/myrepo=3 --scale myorg=1
+./runnermaxxer.sh --drain 4                # remove runner-4 after its current job
+./runnermaxxer.sh --stop 2 && ./runnermaxxer.sh --start 2
+./runnermaxxer.sh --remove runner-5        # "runner-" prefix is optional
+```
+
+`--status --json` prints one object:
+
+```json
+{"version":"3.0.0","daemon_pid":4242,"max_runners":20,"github_polled_at":1727430000,
+ "projects":[{"url":"https://github.com/myorg/myrepo","label":"myorg/myrepo","listed":true,
+              "configured":2,"running":2,"busy":1,"draining":0}],
+ "runners":[{"id":1,"project":"https://github.com/myorg/myrepo","state":"busy","pid":12345,
+             "status":"running: build (3m)","ephemeral":false,"last_error":null}]}
+```
+
+`state` is one of `running`, `idle`, `busy`, `draining`, `stopped`, `quarantined`, `restarting`; `pid` and `daemon_pid` are `null` when not running; `project` is `null` for a runner whose setup never completed; `listed` is false for a project that has runners but isn't in `.runnermaxxer.targets`.
+
+`--scale TARGET=N` accepts the same target forms as `--target` (`owner/repo`, `org`, or a URL), adds the target to `.runnermaxxer.targets` if needed, and adds or removes runners like the project menu does (busy runners are drained, not killed). It refuses changes that would put the total across all projects over `MAX_RUNNERS`.
+
+Locking: `--status` is read-only and takes no lock. The mutating commands (`--scale`, `--drain`, `--stop`, `--start`, `--remove`) take the manager lock when nothing else is running, and refuse to run while the TUI is open (make the change there). While the daemon is running they instead take a short-lived operation lock that the daemon also takes around each supervisor tick, so a command and a tick never act on runners at the same time; the daemon picks up the result on its next tick. Without a daemon, runners started this way are not supervised until you start one.
 
 ## Configuration
 
@@ -240,7 +308,8 @@ gh-runnermaxxer/
     ├── runner-1/
     ├── runner-2/
     ├── .pids/
-    ├── .logs/
+    ├── .logs/                   # runner-N.log, runnermaxxer.log (daemon events), daemon.out
+    ├── .daemon.pid              # PID of a running --daemon
     └── .toolcache/              # Shared tool cache (SHARED_TOOL_CACHE=1)
 ```
 
