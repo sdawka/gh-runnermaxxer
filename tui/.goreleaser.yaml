@@ -1,0 +1,78 @@
+version: 2
+project_name: runnermaxxer
+
+builds:
+  - id: tui
+    main: ./cmd/runnermaxxer-tui
+    binary: runnermaxxer-tui
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    flags:
+      - -trimpath
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      # The bash engine ships in every archive: the TUI is a client for it,
+      # never a replacement, and needs it on disk to exec against.
+      # strip_parent: without it, a "../"-escaping src is stored under its
+      # full source path inside the archive instead of at the archive root.
+      - src: ../runnermaxxer.sh
+        strip_parent: true
+      - src: ../README.md
+        strip_parent: true
+      - src: ../.runnermaxxer.conf.sample
+        strip_parent: true
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+
+# goreleaser's formula-generating "brews" is deprecated as of v2.10 in
+# favor of "homebrew_casks" (https://goreleaser.com/deprecations/#brews);
+# `goreleaser check` fails the release-check CI job on deprecated keys, so
+# this uses the cask form. A cask only manages the runnermaxxer-tui binary
+# itself - the bash engine still ships inside the release archive above,
+# but Homebrew users fetch it via the post-install hook below rather than
+# a formula's libexec/pkgshare, since casks have no equivalent stanzas.
+homebrew_casks:
+  - name: runnermaxxer
+    repository:
+      owner: sdawka
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: https://github.com/sdawka/gh-runnermaxxer
+    description: GitHub Actions self-hosted runner manager with a TUI
+    binaries:
+      - runnermaxxer-tui
+    dependencies:
+      - formula: gh
+      - formula: bash
+    hooks:
+      post:
+        install: |
+          engine_dir = "#{Dir.home}/.runnermaxxer"
+          FileUtils.mkdir_p(engine_dir)
+          FileUtils.cp("#{staged_path}/runnermaxxer.sh", "#{engine_dir}/runnermaxxer.sh")
+          FileUtils.chmod("+x", "#{engine_dir}/runnermaxxer.sh")
+          FileUtils.cp("#{staged_path}/.runnermaxxer.conf.sample", "#{engine_dir}/.runnermaxxer.conf.sample")
+    caveats: |
+      The bash engine was copied to ~/.runnermaxxer/runnermaxxer.sh (RUNNER_BASE_DIR
+      defaults to a sibling "runners" dir there - set RUNNER_BASE_DIR to change it).
+      Run it directly, or run runnermaxxer-tui, which finds it via
+      RUNNERMAXXER_SCRIPT, --script, or by searching alongside itself and on PATH.
+
+release:
+  github:
+    owner: sdawka
+    name: gh-runnermaxxer
