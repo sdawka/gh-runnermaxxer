@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
@@ -62,6 +63,14 @@ func (e Exec) Run(ctx context.Context, timeout time.Duration, args ...string) Re
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// The script forks children (gh, ps, sleep). On timeout kill the whole
+	// process group, and don't let a grandchild that still holds the pipes
+	// keep Wait blocked past a short grace period.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 2 * time.Second
 
 	err := cmd.Run()
 	duration := time.Since(start)

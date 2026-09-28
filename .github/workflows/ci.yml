@@ -11,6 +11,10 @@ jobs:
         os: [macos-latest, ubuntu-latest] # macOS gives bash 3.2 coverage
     steps:
       - uses: actions/checkout@v4
+      - name: install shellcheck
+        run: |
+          if command -v brew >/dev/null 2>&1; then brew install shellcheck
+          else sudo apt-get update -q && sudo apt-get install -y -q shellcheck; fi
       - name: shellcheck runnermaxxer.sh
         run: |
           # --severity=error only: the script carries pre-existing SC2015/

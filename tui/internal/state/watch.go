@@ -154,18 +154,20 @@ func (w *Watcher) pollAndMaybeEmit() {
 func (w *Watcher) reloadAndEmit() {
 	info, statErr := os.Stat(w.stateFile)
 	snap, err := Load(w.stateFile)
+	// Record what we looked at whether or not it parsed: a file that failed
+	// to parse must not be reported again by the poller until it changes.
+	if statErr == nil {
+		w.mu.Lock()
+		w.lastMod = info.ModTime()
+		w.lastSize = info.Size()
+		w.mu.Unlock()
+	}
 	if err != nil {
 		select {
 		case w.events <- Event{Err: err}:
 		case <-w.done:
 		}
 		return
-	}
-	if statErr == nil {
-		w.mu.Lock()
-		w.lastMod = info.ModTime()
-		w.lastSize = info.Size()
-		w.mu.Unlock()
 	}
 	select {
 	case w.events <- Event{Snapshot: snap}:
