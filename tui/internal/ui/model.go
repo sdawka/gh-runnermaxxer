@@ -122,6 +122,18 @@ type Model struct {
 	Log        *LogPane
 	logCancel  context.CancelFunc
 	logUpdates <-chan logtail.Update
+
+	// Tail is the dashboard's always-on live tail of the cursor's runner
+	// log (the daemon log on a header row), shown under the detail block.
+	// Update re-points it when the cursor moves (syncTail); it is stopped
+	// while an explicit Log view is open, since that shows the same thing
+	// in more room.
+	Tail        *LogPane
+	tailCancel  context.CancelFunc
+	tailUpdates <-chan logtail.Update
+
+	// logSeq numbers every tail started, for LogPane.stream.
+	logSeq int
 }
 
 // New builds the initial Model. w may be nil when there is no state.json to

@@ -49,6 +49,7 @@ type applyResultMsg struct {
 // freshly started logtail.Tail for id (a runner id, or daemonLogID).
 type logTailStartedMsg struct {
 	id      int
+	stream  int // LogPane.stream of the pane this tail was started for
 	lines   []string
 	updates <-chan logtail.Update
 }
@@ -57,15 +58,17 @@ type logTailStartedMsg struct {
 // right after the underlying file was truncated (rotation): the consumer
 // should replace its buffer instead of appending.
 type logLinesMsg struct {
-	id    int
-	lines []string
-	reset bool
+	id     int
+	stream int
+	lines  []string
+	reset  bool
 }
 
 // logErrMsg is a tail failure for runner id.
 type logErrMsg struct {
-	id  int
-	err error
+	id     int
+	stream int
+	err    error
 }
 
 // ghStatusMsg carries the text of `--gh-status` for the 'c' modal.

@@ -44,20 +44,52 @@ func loadFullSnapshotForView(t *testing.T) state.Snapshot {
 
 func renderDashboard(t *testing.T, width, height int) string {
 	t.Helper()
+	return dashboardModel(t, width, height, loadFullSnapshotForView(t)).renderString()
+}
+
+// dashboardModel builds a sized model showing snap under NO_COLOR, with
+// the clock pinned and the side pane's live tail fed a fixed set of lines
+// (the tail's Cmd is never run, so no file is read).
+func dashboardModel(t *testing.T, width, height int, snap state.Snapshot) Model {
+	t.Helper()
 	t.Setenv("NO_COLOR", "1")
 
-	m := New(context.Background(), cli.NewClient(nopRunner{}), cli.Paths{}, nil)
-	m.Theme = NewTheme() // rebuild now that NO_COLOR is set for this test
+	m := New(context.Background(), cli.NewClient(nopRunner{}), cli.Paths{DaemonLog: "/abs/runners/.logs/daemon.log"}, nil)
+	m.Theme = NewTheme()                                   // rebuild now that NO_COLOR is set for this test
+	m.Now = time.Unix(snap.TickTS, 0).Add(2 * time.Second) // pin the clock: deterministic "tick 2s ago"
 
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: width, Height: height})
 	m = updated.(Model)
-
-	snap := loadFullSnapshotForView(t)
 	updated, _ = m.Update(snapshotMsg{snap: snap})
 	m = updated.(Model)
-	m.Now = time.Unix(snap.TickTS, 0).Add(2 * time.Second) // pin the clock: deterministic "tick 2s ago"
+	return feedTail(t, m)
+}
 
-	return m.renderString()
+// feedTail delivers a canned logTailStartedMsg to the model's live tail.
+func feedTail(t *testing.T, m Model) Model {
+	t.Helper()
+	if m.Tail == nil {
+		t.Fatal("no live tail after sizing the dashboard")
+	}
+	var lines []string
+	if m.Tail.RunnerID == daemonLogID {
+		lines = []string{
+			"2026-09-28T12:00:40 tick: 3 targets, 5 runners, 1 busy",
+			"2026-09-28T12:00:41 myorg/myrepo: queued 3, scaling 2 -> 2 (max 5)",
+			"2026-09-28T12:00:42 mac-4: exited unexpectedly (fails 2), retry in 20s",
+			"2026-09-28T12:00:43 myorg (org): token lacks admin:org",
+			"2026-09-28T12:00:45 tick: 3 targets, 5 runners, 1 busy",
+		}
+	} else {
+		lines = []string{
+			"√ Connected to GitHub",
+			"Current runner version: '2.337.0'",
+			"2026-09-28 12:00:01Z: Listening for Jobs",
+			"2026-09-28 12:04:12Z: Running job: build",
+		}
+	}
+	updated, _ := m.Update(logTailStartedMsg{id: m.Tail.RunnerID, stream: m.Tail.stream, lines: lines})
+	return updated.(Model)
 }
 
 func assertGolden(t *testing.T, name, got string) {
@@ -109,11 +141,30 @@ func TestDashboardShowsBusyRunnerAndScopeError(t *testing.T) {
 	if !strings.Contains(got, "build") {
 		t.Errorf("frame missing the busy runner's job name:\n%s", got)
 	}
-	if !strings.Contains(got, "token lacks admin:org") {
-		t.Errorf("frame missing the target scope error:\n%s", got)
+	// With the side pane showing a detail block, the row keeps only the
+	// error class; the full message is in the detail block once the cursor
+	// is on that target.
+	if !strings.Contains(got, "⚠ scope") {
+		t.Errorf("frame missing the target's error marker:\n%s", got)
 	}
 	if !strings.Contains(got, "myorg/myrepo") {
 		t.Errorf("frame missing the repo target label:\n%s", got)
+	}
+
+	m := dashboardModel(t, 120, 40, loadFullSnapshotForView(t))
+	m.Cursor = 7 // the myorg (org) target row
+	if got := m.renderString(); !strings.Contains(got, "scope: token lacks admin:org") {
+		t.Errorf("detail block missing the target scope error:\n%s", got)
+	}
+}
+
+// TestNarrowWithoutRoomForDetailKeepsInlineErrors: when the table takes
+// every row (too short for a detail block), rows fall back to showing a
+// truncated error inline.
+func TestNarrowWithoutRoomForDetailKeepsInlineErrors(t *testing.T) {
+	got := dashboardModel(t, 90, 11, loadFullSnapshotForView(t)).renderString()
+	if !strings.Contains(got, "session conflict") || !strings.Contains(got, "exited unexpectedly") {
+		t.Errorf("expected inline errors with no detail area:\n%s", got)
 	}
 }
 

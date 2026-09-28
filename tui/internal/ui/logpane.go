@@ -21,6 +21,19 @@ type LogPane struct {
 	Viewport viewport.Model
 	Follow   bool // true: auto-scroll to the newest line as it arrives
 	Err      error
+
+	// stream identifies the logtail.Tail feeding this pane, so messages
+	// from a tail that has since been replaced (cursor moved, pane
+	// switched) are dropped even when they carry the same runner id. path
+	// is the file being followed ("" when there is none yet).
+	stream int
+	path   string
+}
+
+// matches reports whether a log message for (id, stream) belongs to lp.
+// Safe on a nil pane.
+func (lp *LogPane) matches(id, stream int) bool {
+	return lp != nil && lp.RunnerID == id && lp.stream == stream
 }
 
 // newLogPane builds an empty pane sized to width x height, following the
@@ -39,6 +52,9 @@ func newLogPane(title string, runnerID, width, height int) *LogPane {
 func (lp *LogPane) resize(width, height int) {
 	lp.Viewport.SetWidth(width)
 	lp.Viewport.SetHeight(height)
+	if lp.Follow {
+		lp.Viewport.GotoBottom()
+	}
 }
 
 // setLines replaces the pane's whole buffer (the initial tail, or a reset

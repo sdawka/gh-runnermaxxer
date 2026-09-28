@@ -122,20 +122,23 @@ func ghStatus(ctx context.Context, c cli.Client) tea.Cmd {
 // plus the update channel to keep following it. ctx should be a
 // child context the caller can cancel independently (switching runners, or
 // closing the pane) without tearing down the rest of the program.
-func startLogTail(ctx context.Context, id int, path string) tea.Cmd {
+// stream is the LogPane.stream of the pane it feeds, carried on every
+// message so Update can route it (explicit log view vs. the side pane's
+// live tail) and drop it once that pane has moved on.
+func startLogTail(ctx context.Context, id, stream int, path string) tea.Cmd {
 	return func() tea.Msg {
 		lines, updates, err := logtail.Tail(ctx, path, logRingLimit)
 		if err != nil {
-			return logErrMsg{id: id, err: err}
+			return logErrMsg{id: id, stream: stream, err: err}
 		}
-		return logTailStartedMsg{id: id, lines: lines, updates: updates}
+		return logTailStartedMsg{id: id, stream: stream, lines: lines, updates: updates}
 	}
 }
 
 // listenLogUpdates reads the next Update off a logtail channel and wraps it
 // as a tea.Msg; Update re-issues this after each message to keep listening,
 // exactly like watchSnapshot does for the state.Watcher channel.
-func listenLogUpdates(id int, updates <-chan logtail.Update) tea.Cmd {
+func listenLogUpdates(id, stream int, updates <-chan logtail.Update) tea.Cmd {
 	if updates == nil {
 		return nil
 	}
@@ -145,8 +148,8 @@ func listenLogUpdates(id int, updates <-chan logtail.Update) tea.Cmd {
 			return nil
 		}
 		if upd.Err != nil {
-			return logErrMsg{id: id, err: upd.Err}
+			return logErrMsg{id: id, stream: stream, err: upd.Err}
 		}
-		return logLinesMsg{id: id, lines: upd.Lines, reset: upd.Reset}
+		return logLinesMsg{id: id, stream: stream, lines: upd.Lines, reset: upd.Reset}
 	}
 }

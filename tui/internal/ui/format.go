@@ -80,6 +80,16 @@ func wrapText(s string, width int) []string {
 		for len(cur)+len(w) > width {
 			// A word longer than the line (a path, a URL): hard-break it.
 			n := width - len(cur)
+			if len(cur) == 0 {
+				// Prefer breaking a path/URL just after a '/' when one
+				// falls in the back half of the line.
+				for i := n - 1; i >= n/2; i-- {
+					if w[i] == '/' {
+						n = i + 1
+						break
+					}
+				}
+			}
 			lines = append(lines, string(append(cur, w[:n]...)))
 			cur, w = nil, w[n:]
 		}

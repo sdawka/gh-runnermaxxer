@@ -21,10 +21,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // afterUpdate runs the bookkeeping every message needs once it has been
-// handled: keeping the table's scroll window following the cursor.
+// handled: keeping the table's scroll window following the cursor, and the
+// side pane's live tail following the cursor's runner (or the daemon log).
 func (m Model) afterUpdate(cmd tea.Cmd) (tea.Model, tea.Cmd) {
-	m.TableOffset = m.tableWindow(m.tableHeight()).offset
-	return m, cmd
+	if m.Screen == ScreenDashboard || m.Screen == ScreenProjects {
+		m.TableOffset = m.tableWindow(m.layout().tableH).offset
+	}
+	m, tailCmd := m.syncTail()
+	return m, tea.Batch(cmd, tailCmd)
 }
 
 func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -79,28 +83,43 @@ func (m Model) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// that requested them returns.
 		return m, pollCLI(m.ctx, m.Client)
 
+	// Log messages go to whichever pane they were started for: the explicit
+	// 'l'/'L' view (m.Log) or the side pane's live tail (m.Tail). Anything
+	// else is stale - that pane was switched or closed before it arrived.
 	case logTailStartedMsg:
-		if m.Log == nil || m.Log.RunnerID != msg.id {
-			return m, nil // stale: the pane was switched or closed before this arrived
-		}
-		m.logUpdates = msg.updates
-		m.Log.setLines(msg.lines)
-		return m, listenLogUpdates(msg.id, msg.updates)
-
-	case logLinesMsg:
-		if m.Log == nil || m.Log.RunnerID != msg.id {
+		switch {
+		case m.Log.matches(msg.id, msg.stream):
+			m.logUpdates = msg.updates
+			m.Log.setLines(msg.lines)
+		case m.Tail.matches(msg.id, msg.stream):
+			m.tailUpdates = msg.updates
+			m.Tail.setLines(msg.lines)
+		default:
 			return m, nil
 		}
-		if msg.reset {
-			m.Log.setLines(msg.lines)
-		} else {
-			m.Log.appendLines(msg.lines)
+		return m, listenLogUpdates(msg.id, msg.stream, msg.updates)
+
+	case logLinesMsg:
+		pane, updates := m.Log, m.logUpdates
+		if !m.Log.matches(msg.id, msg.stream) {
+			if !m.Tail.matches(msg.id, msg.stream) {
+				return m, nil
+			}
+			pane, updates = m.Tail, m.tailUpdates
 		}
-		return m, listenLogUpdates(msg.id, m.logUpdates)
+		if msg.reset {
+			pane.setLines(msg.lines)
+		} else {
+			pane.appendLines(msg.lines)
+		}
+		return m, listenLogUpdates(msg.id, msg.stream, updates)
 
 	case logErrMsg:
-		if m.Log != nil && m.Log.RunnerID == msg.id {
+		switch {
+		case m.Log.matches(msg.id, msg.stream):
 			m.Log.Err = msg.err
+		case m.Tail.matches(msg.id, msg.stream):
+			m.Tail.Err = msg.err
 		}
 		return m, nil
 

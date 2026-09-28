@@ -86,27 +86,89 @@ func (m Model) openRunnerLog(id int, name, path string) (Model, tea.Cmd) {
 		m.notice("no log file yet for "+orDefault(name, "that runner"), LevelWarn)
 		return m, nil
 	}
-	if m.logCancel != nil {
-		m.logCancel()
-	}
-	ctx, cancel := context.WithCancel(m.ctx)
-	m.logCancel = cancel
-	m.logUpdates = nil
-	m.Log = newLogPane("runner "+name, id, m.Width, m.Height)
-	return m, startLogTail(ctx, id, path)
+	return m.openLog("runner "+name, id, path)
 }
 
 // openDaemonLog starts tailing the daemon's event log (runnermaxxer.sh's
 // DAEMON_LOG, README's 'L').
 func (m Model) openDaemonLog() (Model, tea.Cmd) {
+	return m.openLog("daemon log", daemonLogID, m.Paths.DaemonLog)
+}
+
+// openLog opens the explicit log view on path. When the side pane's live
+// tail is already following that same file it is promoted into the view
+// as-is (buffer, goroutine and all) instead of re-reading the file.
+func (m Model) openLog(title string, id int, path string) (Model, tea.Cmd) {
 	if m.logCancel != nil {
 		m.logCancel()
+	}
+	if t := m.Tail; t != nil && t.RunnerID == id && t.path == path && t.stream > 0 {
+		t.Title = title
+		t.resize(m.Width, m.Height)
+		m.Log, m.logCancel, m.logUpdates = t, m.tailCancel, m.tailUpdates
+		m.Tail, m.tailCancel, m.tailUpdates = nil, nil, nil
+		return m, nil
 	}
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.logCancel = cancel
 	m.logUpdates = nil
-	m.Log = newLogPane("daemon log", daemonLogID, m.Width, m.Height)
-	return m, startLogTail(ctx, daemonLogID, m.Paths.DaemonLog)
+	m.logSeq++
+	m.Log = newLogPane(title, id, m.Width, m.Height)
+	m.Log.stream, m.Log.path = m.logSeq, path
+	return m, startLogTail(ctx, id, m.Log.stream, path)
+}
+
+// tailSource is what the side pane's live tail should follow for the
+// current cursor: the runner's own log on a runner row, the daemon log on
+// a target/Unconfigured header row (or with no rows at all).
+func (m Model) tailSource() (id int, path, title string) {
+	if row, ok := m.cursorRow(); ok && row.Kind == RowRunner {
+		return row.Runner.ID, row.Runner.LogPath, "log: " + row.Runner.Name
+	}
+	return daemonLogID, m.Paths.DaemonLog, "daemon log"
+}
+
+// syncTail points the live tail at tailSource, starting a new logtail only
+// when the source actually changed (so a snapshot tick or a keypress that
+// doesn't move the cursor never re-reads the file). The tail is stopped
+// while an explicit log view is open, and left alone on the form/config
+// screens. Nothing starts before the first WindowSizeMsg.
+func (m Model) syncTail() (Model, tea.Cmd) {
+	if m.Width <= 0 || m.ctx == nil {
+		return m, nil
+	}
+	if m.Screen != ScreenDashboard && m.Screen != ScreenProjects {
+		return m, nil
+	}
+	if m.Log != nil {
+		return m.stopTail(), nil
+	}
+	id, path, title := m.tailSource()
+	if m.Tail != nil && m.Tail.RunnerID == id && m.Tail.path == path {
+		m.Tail.Title = title
+		return m, nil
+	}
+	m = m.stopTail()
+	m.Tail = newLogPane(title, id, 0, 0)
+	m.Tail.path = path
+	m.Tail.stream = -1 // no tail running: matches no message
+	if path == "" {
+		return m, nil
+	}
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.tailCancel = cancel
+	m.logSeq++
+	m.Tail.stream = m.logSeq
+	return m, startLogTail(ctx, id, m.Tail.stream, path)
+}
+
+// stopTail cancels the live tail's goroutine (if any) and drops it.
+func (m Model) stopTail() Model {
+	if m.tailCancel != nil {
+		m.tailCancel()
+	}
+	m.Tail, m.tailCancel, m.tailUpdates = nil, nil, nil
+	return m
 }
 
 // navigateLog switches the open runner log to the next (or, with next
