@@ -112,7 +112,7 @@ t_fail_ok "and dropped from the config" grep -q REPO_URL "$CONFIG_FILE"
 t_eq "3" "$MAX_RUNNERS" "other keys kept through the migration"
 
 # --- run_onboarding without a terminal ------------------------------------------------------
-out=$( (run_onboarding) < /dev/null 2>&1 ); rc=$?
+rc=0; out=$( (run_onboarding) < /dev/null 2>&1 ) || rc=$?
 t_eq "2" "$rc" "run_onboarding without a tty exits 2"
 case "$out" in *"Setup"*) t_eq "no banner" "$out" "no banner printed" ;; *) t_eq 1 1 "no banner printed" ;; esac
 
