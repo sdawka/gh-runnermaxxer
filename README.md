@@ -43,7 +43,8 @@ One instance manages runners for any number of repositories and organizations. A
 - **Auto-download runner tarball** - fetches the latest release for your OS/arch and verifies its SHA-256 checksum
 - **Log rotation** - runner logs are truncated past a size limit so they can't fill the disk
 - **Config validation** - detects invalid URLs, bad values, and offers to fix them; pasted URLs are normalized (trailing `/`, `.git`)
-- **Scale runners up/down** with a single keypress - scale-down prefers idle runners and warns before killing one mid-job
+- **Scale runners up/down** with a single keypress - scale-down prefers idle runners
+- **Drain mode** - scaling down never aborts a job: a busy runner is marked *draining* (shown in yellow), stops counting toward its project, and is deregistered and removed as soon as its current job finishes. Scaling back up cancels pending drains before setting up new runners
 - **Auto-detect labels** based on system capabilities (OS, arch, memory, GPU, Docker, WSL, etc.)
 - **Live status** showing what each runner is doing (idle, running job, errors, quarantined)
 - **Multiple projects in one instance** - run runners for several repositories and organizations side by side; each runner is registered to exactly one of them and the dashboard groups runners by project
@@ -82,7 +83,7 @@ Not supported: Windows (the Windows runner uses a different install flow), Alpin
 | `↑`/`↓` | Select a project |
 | `←`/`→` (or `+`/`-`, `0-9`) | Change the selected project's runner count |
 | `Enter` | Apply pending runner-count changes (`Esc` discards them) |
-| `d` | Remove a specific runner (arrow-key picker) |
+| `d` | Remove a specific runner (arrow-key picker); a busy runner can be drained (default), killed now, or left alone |
 | `s` | Start all runners |
 | `x` | Stop all runners |
 | `r` | Restart all runners |
