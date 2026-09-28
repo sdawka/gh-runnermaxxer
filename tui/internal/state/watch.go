@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -38,9 +39,25 @@ type Watcher struct {
 	closeOnce sync.Once
 	wg        sync.WaitGroup
 
-	mu       sync.Mutex
-	lastMod  time.Time
-	lastSize int64
+	mu   sync.Mutex
+	last fileKey
+}
+
+// fileKey identifies one version of the state file. The daemon replaces
+// the file with a rename, so every version has a fresh inode even when two
+// versions happen to share an mtime (coarse filesystem timestamps) and size.
+type fileKey struct {
+	mod  time.Time
+	size int64
+	ino  uint64
+}
+
+func keyOf(info os.FileInfo) fileKey {
+	k := fileKey{mod: info.ModTime(), size: info.Size()}
+	if st, ok := info.Sys().(*syscall.Stat_t); ok {
+		k.ino = uint64(st.Ino)
+	}
+	return k
 }
 
 // NewWatcher starts watching stateFile and returns immediately; call
@@ -135,33 +152,35 @@ func (w *Watcher) loop(fsw *fsnotify.Watcher, poll time.Duration) {
 	}
 }
 
-// pollAndMaybeEmit stats the state file and reloads only if its mtime or
-// size changed since the last successful load.
+// pollAndMaybeEmit is the poll-fallback path; the change check itself
+// lives in reloadAndEmit so fsnotify and polling can never both report the
+// same version of the file.
 func (w *Watcher) pollAndMaybeEmit() {
+	w.reloadAndEmit()
+}
+
+// reloadAndEmit loads the state file and emits an Event if it is a version
+// not seen before. The version is recorded before parsing, whether or not
+// the parse succeeds: a file that failed to parse must not be reported
+// again until it changes, and one fsnotify event plus one poll tick for the
+// same rename must produce a single Event.
+func (w *Watcher) reloadAndEmit() {
 	info, err := os.Stat(w.stateFile)
 	if err != nil {
 		return // no file yet (or removed); nothing to report
 	}
+	key := keyOf(info)
 	w.mu.Lock()
-	changed := !info.ModTime().Equal(w.lastMod) || info.Size() != w.lastSize
+	changed := key != w.last
+	if changed {
+		w.last = key
+	}
 	w.mu.Unlock()
 	if !changed {
 		return
 	}
-	w.reloadAndEmit()
-}
 
-func (w *Watcher) reloadAndEmit() {
-	info, statErr := os.Stat(w.stateFile)
 	snap, err := Load(w.stateFile)
-	// Record what we looked at whether or not it parsed: a file that failed
-	// to parse must not be reported again by the poller until it changes.
-	if statErr == nil {
-		w.mu.Lock()
-		w.lastMod = info.ModTime()
-		w.lastSize = info.Size()
-		w.mu.Unlock()
-	}
 	if err != nil {
 		select {
 		case w.events <- Event{Err: err}:
