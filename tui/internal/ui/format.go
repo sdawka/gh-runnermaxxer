@@ -65,10 +65,28 @@ func wrapText(s string, width int) []string {
 	if width <= 0 {
 		return []string{s}
 	}
-	wrapped := ansi.Wrap(s, width, "/-")
-	lines := strings.Split(wrapped, "\n")
-	for i, l := range lines {
-		lines[i] = strings.TrimRight(l, " ")
+	var lines []string
+	var cur []rune
+	for _, word := range strings.Fields(s) {
+		w := []rune(word)
+		switch {
+		case len(cur) == 0:
+		case len(cur)+1+len(w) <= width:
+			cur = append(cur, ' ')
+		default:
+			lines = append(lines, string(cur))
+			cur = nil
+		}
+		for len(cur)+len(w) > width {
+			// A word longer than the line (a path, a URL): hard-break it.
+			n := width - len(cur)
+			lines = append(lines, string(append(cur, w[:n]...)))
+			cur, w = nil, w[n:]
+		}
+		cur = append(cur, w...)
+	}
+	if len(cur) > 0 || len(lines) == 0 {
+		lines = append(lines, string(cur))
 	}
 	return lines
 }
