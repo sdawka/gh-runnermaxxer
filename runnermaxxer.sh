@@ -1270,7 +1270,9 @@ clear_failure_state() {
     rm -f "$PID_DIR/runner-$1.failcount" \
           "$PID_DIR/runner-$1.quarantined" \
           "$PID_DIR/runner-$1.lasterr" \
-          "$PID_DIR/runner-$1.ghoffline"
+          "$PID_DIR/runner-$1.ghoffline" \
+          "$PID_DIR/runner-$1.ghbusy" \
+          "$PID_DIR/runner-$1.ghseen"
 }
 
 clear_runner_state() {
@@ -1307,7 +1309,41 @@ count_running() {
     echo $count
 }
 
+# Display status. The log-derived text carries the job name, but when fresh
+# GitHub API data is available for this runner and disagrees, the API wins.
 get_runner_status() {
+    local id=$1 st
+    st=$(log_runner_status "$id")
+    if gh_known "$id"; then
+        if [[ -f "$PID_DIR/runner-$id.ghbusy" ]]; then
+            [[ "$st" == running:* ]] || st="busy (per GitHub)"
+        else
+            [[ "$st" == running:* ]] && st="idle"
+        fi
+    fi
+    echo "$st"
+}
+
+# GitHub data is fresh when the last successful poll is younger than about
+# two poll intervals (min 30s). Polling disabled -> never fresh.
+gh_data_fresh() {
+    [[ "$GH_HEALTH_TICKS" -gt 0 ]] || return 1
+    local ts max now
+    ts=$(cat "$PID_DIR/gh-poll.ts" 2>/dev/null || echo "")
+    [[ "$ts" =~ ^[0-9]+$ ]] || return 1
+    max=$((GH_HEALTH_TICKS * REFRESH_INTERVAL * 2))
+    [[ $max -lt 30 ]] && max=30
+    now=$(date +%s)
+    [[ $((now - ts)) -le $max ]]
+}
+
+# Fresh GitHub data exists and this runner appeared in the last poll
+gh_known() {
+    [[ -f "$PID_DIR/runner-$1.ghseen" ]] && gh_data_fresh
+}
+
+# Status derived purely from the runner's own log (lifecycle lines)
+log_runner_status() {
     local id=$1
     local log_file="$LOG_DIR/runner-$id.log"
 
@@ -1342,7 +1378,12 @@ get_runner_status() {
 }
 
 is_busy() {
-    is_running "$1" && [[ "$(get_runner_status "$1")" == running:* ]]
+    is_running "$1" || return 1
+    if gh_known "$1"; then
+        [[ -f "$PID_DIR/runner-$1.ghbusy" ]]
+    else
+        [[ "$(log_runner_status "$1")" == running:* ]]
+    fi
 }
 
 # ============================================================================
@@ -1427,26 +1468,49 @@ supervise_runners() {
 # → recycle the process. Skipped entirely when the API is unreachable so a
 # GitHub/network outage doesn't trigger mass restarts.
 check_github_health() {
-    local t endpoint online id name cnt now started
+    local t endpoint rows online id name gbusy cnt now started polled=0
     now=$(date +%s)
 
     for t in $(known_targets); do
         [[ -n "$(runner_ids_for_target "$t")" ]] || continue
         endpoint=$(target_api_endpoint "$t")
-        online=$(gh api --paginate "$endpoint" --jq '.runners[] | select(.status == "online") | .name' 2>/dev/null) || continue
+        # One pass: name<TAB>status<TAB>busy per registered runner
+        if ! rows=$(gh api --paginate "$endpoint" --jq '.runners[] | "\(.name)\t\(.status)\t\(.busy)"' 2>/dev/null); then
+            # No API view for this target: drop its markers so is_busy and
+            # the status column fall back to the logs
+            for id in $(runner_ids_for_target "$t"); do
+                rm -f "$PID_DIR/runner-$id.ghseen" "$PID_DIR/runner-$id.ghbusy"
+            done
+            continue
+        fi
+        polled=1
+        online=$(printf '%s\n' "$rows" | awk -F'\t' '$2 == "online" { print $1 }')
 
         for id in $(runner_ids_for_target "$t"); do
             local off_file="$PID_DIR/runner-$id.ghoffline"
             if ! is_running "$id"; then
-                rm -f "$off_file"
+                rm -f "$off_file" "$PID_DIR/runner-$id.ghseen" "$PID_DIR/runner-$id.ghbusy"
                 continue
             fi
+
+            name=$(registered_name "$id")
+            gbusy=$(printf '%s\n' "$rows" | awk -F'\t' -v n="$name" '$1 == n { print $3; exit }')
+            if [[ -n "$gbusy" ]]; then
+                touch "$PID_DIR/runner-$id.ghseen"
+                if [[ "$gbusy" == "true" ]]; then
+                    touch "$PID_DIR/runner-$id.ghbusy"
+                else
+                    rm -f "$PID_DIR/runner-$id.ghbusy"
+                fi
+            else
+                rm -f "$PID_DIR/runner-$id.ghseen" "$PID_DIR/runner-$id.ghbusy"
+            fi
+
             # Grace period: a freshly started runner may not show online yet
             started=$(cat "$PID_DIR/runner-$id.laststart" 2>/dev/null || echo 0)
             [[ "$started" =~ ^[0-9]+$ ]] || started=0
             [[ $((now - started)) -lt 120 ]] && continue
 
-            name=$(registered_name "$id")
             if printf '%s\n' "$online" | grep -qFx "$name"; then
                 rm -f "$off_file"
             else
@@ -1464,6 +1528,7 @@ check_github_health() {
             fi
         done
     done
+    [[ $polled -eq 1 ]] && echo "$now" > "$PID_DIR/gh-poll.ts"
     return 0
 }
 # ============================================================================
@@ -1676,7 +1741,7 @@ render_runner_line() {
         status=$(get_runner_status "$id")
         status_color="${DIM}"
 
-        [[ "$status" == running:* ]] && status_color="${CYAN}"
+        [[ "$status" == running:* || "$status" == busy* ]] && status_color="${CYAN}"
         [[ "$status" == "idle"* ]] && status_color="${DIM}"
         [[ "$status" == *"error"* ]] && status_color="${RED}"
 
@@ -1696,6 +1761,22 @@ render_runner_line() {
     fi
 }
 
+# Dim header note: age of the GitHub API data behind runner status
+gh_poll_note() {
+    local ts
+    if [[ "$GH_HEALTH_TICKS" -eq 0 ]]; then
+        echo -e "  ${DIM}GitHub: polling off (status from logs)${NC}"
+        return 0
+    fi
+    ts=$(cat "$PID_DIR/gh-poll.ts" 2>/dev/null || echo "")
+    if [[ "$ts" =~ ^[0-9]+$ ]]; then
+        echo -e "  ${DIM}GitHub: polled $(($(date +%s) - ts))s ago${NC}"
+    else
+        echo -e "  ${DIM}GitHub: not polled yet${NC}"
+    fi
+    return 0
+}
+
 render_ui() {
     local total running disk_mb t ids id any=0 i name box tag pending=0 want
 
@@ -1712,6 +1793,7 @@ render_ui() {
     echo -e "  ╚═══════════════════════════════════════════════════╝${NC}"
     echo ""
     echo -e "  ${DIM}Labels: ${CACHED_LABELS}${NC}"
+    gh_poll_note
     echo ""
     if [[ $pending -eq 1 ]]; then
         echo -e "  ${BOLD}Status:${NC} ${GREEN}$running running${NC} / $total configured  ${YELLOW}→ $want after apply${NC} ${DIM}(max $MAX_RUNNERS)${NC}"
@@ -2133,7 +2215,7 @@ fi
 
 clear
 tput cnorm 2>/dev/null || true
-tick=0
+tick=$((GH_HEALTH_TICKS - 1))   # first loop iteration polls GitHub
 M_SEL=0; M_MSG=""; M_URLS=(); M_WANT=()
 while true; do
     supervise_runners || true
@@ -2165,7 +2247,7 @@ while true; do
         r|R) restart_all || true ;;
         t|T|n|N) target_menu tui || true; M_URLS=(); M_WANT=() ;;
         l|L) view_logs || true ;;
-        c|C) check_github_status || true ;;
+        c|C) check_github_status || true; tick=$((GH_HEALTH_TICKS - 1)) ;;  # re-poll next iteration
         e|E) edit_config || true ;;
         q|Q) quit_prompt || true ;;
     esac

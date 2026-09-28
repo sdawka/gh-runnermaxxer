@@ -88,7 +88,7 @@ Not supported: Windows (the Windows runner uses a different install flow), Alpin
 | `r` | Restart all runners |
 | `t` | Projects & scaling menu (add repos/orgs, set runner counts) |
 | `l` | View runner logs |
-| `c` | Check GitHub runner status |
+| `c` | Check GitHub runner status (also triggers a fresh busy/online poll) |
 | `e` | Edit configuration |
 | `q` | Quit |
 
@@ -124,7 +124,8 @@ While the TUI is open, a supervisor runs every refresh tick:
 - A runner that dies unexpectedly is restarted with exponential backoff (5s, 10s, 20s, 40s, ...).
 - After `MAX_RESTART_ATTEMPTS` consecutive rapid crashes, the runner is **quarantined** (shown as `✖` with the failure reason) so it can't crash-loop forever. Press `s` (start all) or `r` to clear the quarantine and retry.
 - A runner stopped on purpose (via `x` or `-`) stays down.
-- Every `GH_HEALTH_TICKS` ticks, local runners are cross-checked against the GitHub API; a runner whose process is alive but that GitHub reports offline twice in a row is recycled. This check is skipped when the API is unreachable, so a network outage never triggers mass restarts.
+- Every `GH_HEALTH_TICKS` ticks, local runners are cross-checked against the GitHub API; a runner whose process is alive but that GitHub reports offline twice in a row is recycled. This check is skipped when the API is unreachable, so a network outage never triggers mass restarts. The first check runs on the first tick after startup.
+- The same poll records GitHub's authoritative `busy` flag for each runner. While that data is fresh (younger than about two poll intervals, minimum 30s), it decides whether a runner is busy (used when scaling down, stopping, or restarting) and corrects the status column: a runner whose log says it is running a job but GitHub reports idle is shown as `idle`, and one GitHub reports busy but the log does not is shown as `busy (per GitHub)`. When the data is stale, the project could not be fetched, or `GH_HEALTH_TICKS=0`, status falls back to parsing the runner log. The dashboard header shows how old the data is (`GitHub: polled 12s ago`).
 - Runner logs are truncated past `MAX_LOG_SIZE_MB` (a `.log.1` copy is kept).
 - Stale PID files (e.g. after a reboot) are detected via process-identity checks, so a recycled PID is never mistaken for a live runner or killed by accident.
 
