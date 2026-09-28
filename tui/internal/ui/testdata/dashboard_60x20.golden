@@ -1,0 +1,14 @@
+gh-runnermaxxer 3.1.0 · daemon 41213 · tick 2s ago · gh: sahil ◂ (repo, admin:org) · rate 4812/5000
+[2m⚠ REFRESH_INTERVAL clamped to 1[m
+  PROJECT / RUNNER              PID     STATE
+◂ ▾ myorg/myrepo              2/2  [2mauto 1-5[m  [2mqueued 3[m
+    ● mac-1    4121    idle
+    [1m●[m mac-2    4122    running: build (12m)
+    [7m✖[m mac-5    -       quarantined  [2msession conflict: another process holds this runner's registration (cloned dir? second manager?) - remove and re-add[m
+  ▾ myorg/other               2/2
+    ● mac-3    4123    idle (last: Succeeded)
+    [1m◌[m mac-4    -       backoff 18s  [2mexited unexpectedly[m
+  ▾ myorg (org)               0/0  [7m⚠ token lacks admin:org[m
+  ▾ Unconfigured (incomplete setup - remove with d)
+    [2m○[m mac-9    -       unconfigured
+[2m↑↓ move  ←→ count  Enter apply  Esc discard  d drain  x stop  s start  r restart  t projects  ? help[m

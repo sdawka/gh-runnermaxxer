@@ -20,7 +20,7 @@ vet:
 	go vet ./...
 
 golden:
-	go test ./internal/ui -run TestView -update
+	go test ./internal/ui -run Golden -update
 
 snapshot:
 	goreleaser release --snapshot --clean

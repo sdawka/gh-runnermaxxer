@@ -72,7 +72,9 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case ActionDown:
-		m.Cursor++
+		if m.Cursor < len(m.rows())-1 {
+			m.Cursor++
+		}
 		return m, nil
 
 	case ActionInc:
@@ -105,22 +107,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	// ActionRemoveFromList are handled once the screens/exec wiring that
 	// give them meaning land (commits 7-11).
 	return m, nil
-}
-
-// cursorOnHeaderRow reports whether the cursor is on a target's header row
-// as opposed to one of its runner rows. This is a placeholder over the flat
-// Targets slice; it is superseded by the full rows() flattening (targets +
-// runners + the Unconfigured pseudo-group) that the dashboard table adds in
-// commit 7.
-func (m Model) cursorOnHeaderRow() bool {
-	return m.Cursor >= 0 && m.Cursor < len(m.Snap.Targets)
-}
-
-func (m Model) currentTargetURL() string {
-	if m.Cursor >= 0 && m.Cursor < len(m.Snap.Targets) {
-		return m.Snap.Targets[m.Cursor].URL
-	}
-	return ""
 }
 
 func (m *Model) adjustCursorTarget(delta int) {

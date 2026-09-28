@@ -58,6 +58,7 @@ type Model struct {
 	Paths  cli.Paths
 	Keys   KeyMap
 	Theme  Theme
+	Glyphs Glyphs
 
 	watcher       *state.Watcher
 	watcherEvents <-chan state.Event
@@ -98,6 +99,7 @@ func New(ctx context.Context, client cli.Client, paths cli.Paths, w *state.Watch
 		Paths:         paths,
 		Keys:          DefaultKeyMap(),
 		Theme:         NewTheme(),
+		Glyphs:        NewGlyphs(false),
 		watcher:       w,
 		watcherEvents: events,
 		Pending:       NewPendingCounts(),
