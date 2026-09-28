@@ -49,6 +49,9 @@ func (m Model) renderString() string {
 	if m.Screen == ScreenConfig && m.Config != nil {
 		return m.Config.view(m.Snap.Config)
 	}
+	if m.Screen == ScreenGHStatus && m.GHStatusText != nil {
+		return "GitHub status\n\n" + *m.GHStatusText + "\n\n" + m.Theme.Dim.Render("any key closes")
+	}
 
 	var b strings.Builder
 

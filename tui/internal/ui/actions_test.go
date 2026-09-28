@@ -50,6 +50,7 @@ func argsKey(args []string) string {
 func newActionsTestModel(f *fakeRunner, snap state.Snapshot) Model {
 	m := New(context.Background(), cli.NewClient(f), cli.Paths{}, nil)
 	m.Snap = snap
+	m.DaemonUp = snap.DaemonPID != 0
 	m.Cursor = 0
 	return m
 }

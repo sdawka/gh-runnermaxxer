@@ -20,8 +20,7 @@ const (
 	daemonLogID = -2
 )
 
-// Screen identifies which top-level view is active. ScreenGHStatus is
-// added once its commit lands (Go plan §8, commit 13); the full-screen log
+// Screen identifies which top-level view is active. The full-screen log
 // viewer is handled separately via Model.Log rather than as a Screen.
 type Screen int
 
@@ -31,6 +30,7 @@ const (
 	ScreenAddTarget
 	ScreenBounds
 	ScreenConfig
+	ScreenGHStatus
 )
 
 // Level is a Notice's severity, used to pick its style.
@@ -99,6 +99,15 @@ type Model struct {
 	AddTarget  *AddTargetForm
 	Bounds     *BoundsForm
 	Config     *ConfigModel
+
+	// GHStatusText holds --gh-status's output while ScreenGHStatus is open;
+	// nil means the modal isn't open.
+	GHStatusText *string
+
+	// Daemon starts runnermaxxer.sh --daemon detached, for the 'S' banner
+	// action when no daemon is running (§4.1). nil in tests that don't
+	// exercise it.
+	Daemon DaemonStarter
 
 	Width, Height int
 	ShowLog       bool // wide enough for a permanent side log pane, if one is open

@@ -25,6 +25,7 @@ type KeyMap struct {
 	CheckGH        key.Binding
 	Config         key.Binding
 	Download       key.Binding
+	InstallService key.Binding
 	Filter         key.Binding
 	Help           key.Binding
 	Quit           key.Binding
@@ -34,32 +35,33 @@ type KeyMap struct {
 // shift-for-all variants from the Go design doc's §3.4.
 func DefaultKeyMap() KeyMap {
 	return KeyMap{
-		Up:         key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "move up")),
-		Down:       key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "move down")),
-		Left:       key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "count -1")),
-		Right:      key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "count +1")),
-		Inc:        key.NewBinding(key.WithKeys("+", "="), key.WithHelp("+", "count +1")),
-		Dec:        key.NewBinding(key.WithKeys("-", "_"), key.WithHelp("-", "count -1")),
-		Apply:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply pending")),
-		Discard:    key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "discard pending")),
-		Drain:      key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "drain runner")),
-		Remove:     key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "remove now")),
-		Stop:       key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "stop runner")),
-		Start:      key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "start runner")),
-		Restart:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "restart runner")),
-		StopAll:    key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "stop all")),
-		StartAll:   key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "start all")),
-		RestartAll: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "restart all")),
-		Projects:   key.NewBinding(key.WithKeys("t", "n"), key.WithHelp("t", "projects")),
-		AddTarget:  key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add target")),
-		Logs:       key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "logs")),
-		DaemonLog:  key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "daemon log")),
-		CheckGH:    key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "check GitHub")),
-		Config:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "config")),
-		Download:   key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "download tarball")),
-		Filter:     key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		Help:       key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
-		Quit:       key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Up:             key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "move up")),
+		Down:           key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "move down")),
+		Left:           key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "count -1")),
+		Right:          key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "count +1")),
+		Inc:            key.NewBinding(key.WithKeys("+", "="), key.WithHelp("+", "count +1")),
+		Dec:            key.NewBinding(key.WithKeys("-", "_"), key.WithHelp("-", "count -1")),
+		Apply:          key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "apply pending")),
+		Discard:        key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "discard pending")),
+		Drain:          key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "drain runner")),
+		Remove:         key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "remove now")),
+		Stop:           key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "stop runner")),
+		Start:          key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "start runner")),
+		Restart:        key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "restart runner")),
+		StopAll:        key.NewBinding(key.WithKeys("X"), key.WithHelp("X", "stop all")),
+		StartAll:       key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "start all")),
+		RestartAll:     key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "restart all")),
+		Projects:       key.NewBinding(key.WithKeys("t", "n"), key.WithHelp("t", "projects")),
+		AddTarget:      key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add target")),
+		Logs:           key.NewBinding(key.WithKeys("l"), key.WithHelp("l", "logs")),
+		DaemonLog:      key.NewBinding(key.WithKeys("L"), key.WithHelp("L", "daemon log")),
+		CheckGH:        key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "check GitHub")),
+		Config:         key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "config")),
+		Download:       key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "download tarball")),
+		InstallService: key.NewBinding(key.WithKeys("I"), key.WithHelp("I", "install service (no daemon)")),
+		Filter:         key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+		Help:           key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+		Quit:           key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
@@ -74,7 +76,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.Left, k.Right, k.Inc, k.Dec},
 		{k.Apply, k.Discard, k.Drain, k.Remove},
 		{k.Stop, k.Start, k.Restart, k.StopAll, k.StartAll, k.RestartAll},
-		{k.Projects, k.AddTarget, k.Logs, k.DaemonLog, k.CheckGH, k.Config, k.Download},
+		{k.Projects, k.AddTarget, k.Logs, k.DaemonLog, k.CheckGH, k.Config, k.Download, k.InstallService},
 		{k.Filter, k.Help, k.Quit},
 	}
 }
@@ -111,6 +113,7 @@ const (
 	ActionCheckGH
 	ActionConfig
 	ActionDownload
+	ActionInstallService // 'I': only meaningful in the no-daemon banner (§4.1)
 	ActionFilter
 	ActionHelp
 	ActionQuit
@@ -190,6 +193,8 @@ func dashboardKeyToAction(k string, onHeaderRow bool) Action {
 		return Action{Kind: ActionConfig}
 	case "g":
 		return Action{Kind: ActionDownload}
+	case "I":
+		return Action{Kind: ActionInstallService}
 	case "/":
 		return Action{Kind: ActionFilter}
 	case "?":

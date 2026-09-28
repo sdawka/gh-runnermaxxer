@@ -88,6 +88,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case daemonStartedMsg:
+		delete(m.Inflight, globalKey)
+		if msg.err != nil {
+			m.notice("starting the daemon: "+msg.err.Error(), LevelError)
+			return m, nil
+		}
+		m.notice("daemon starting...", LevelInfo)
+		return m, pollCLI(m.ctx, m.Client)
+
+	case ghStatusMsg:
+		text := msg.text
+		if msg.err != nil {
+			text = msg.err.Error()
+		}
+		m.GHStatusText = &text
+		m.Screen = ScreenGHStatus
+		return m, nil
+
 	case tea.KeyPressMsg:
 		if m.Confirm != nil {
 			return m.handleConfirmKey(msg)
@@ -104,6 +122,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleBoundsKey(msg)
 		case ScreenConfig:
 			return m.handleConfigKey(msg)
+		case ScreenGHStatus:
+			// §3.4: "q/Esc/any key closes" the gh-status modal.
+			return m.closeGHStatus()
 		}
 		return m.handleKey(msg)
 	}
@@ -192,6 +213,12 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.confirmAllVariant("stop", func(mm Model) (Model, tea.Cmd) { return mm.execStopAll() })
 
 	case ActionStartAll:
+		// §4.1: while no daemon is running, the shift-S "start all" muscle
+		// memory instead starts the daemon itself - there is nothing to
+		// "start all" of without one supervising the fleet.
+		if !m.DaemonUp {
+			return m.execStartDaemon()
+		}
 		return m.execStartAll()
 
 	case ActionRestartAll:
@@ -219,6 +246,19 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	case ActionConfig:
 		return m.openConfigScreen()
+
+	case ActionCheckGH:
+		return m.openGHStatus()
+
+	case ActionDownload:
+		return m.execDownload()
+
+	case ActionInstallService:
+		if m.DaemonUp {
+			m.notice("a daemon is already running", LevelInfo)
+			return m, nil
+		}
+		return m.confirmInstallService()
 
 	case ActionHelp:
 		m.Help = !m.Help
@@ -286,8 +326,6 @@ func (m Model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m.openDaemonLog()
 	}
 
-	// ActionCheckGH and ActionDownload are handled once the screens/exec
-	// wiring that give them meaning land (commit 13).
 	return m, nil
 }
 

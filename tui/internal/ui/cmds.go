@@ -84,6 +84,40 @@ func applyVerb(ctx context.Context, keys []string, op Op, exec func(context.Cont
 	}
 }
 
+// DaemonStarter starts the daemon detached, satisfied by cli.Daemon; an
+// interface here so tests can substitute a fake instead of spawning a real
+// process (§4.1).
+type DaemonStarter interface {
+	Start() error
+}
+
+// startDaemon runs d.Start() and reports whether it launched successfully.
+// A nil error here only means the exec succeeded, not that the daemon is
+// actually up yet - the caller still needs to poll for that (§4.1).
+func startDaemon(d DaemonStarter) tea.Cmd {
+	return func() tea.Msg {
+		return daemonStartedMsg{err: d.Start()}
+	}
+}
+
+// ghStatus execs --gh-status and reports its text for the 'c' modal.
+func ghStatus(ctx context.Context, c cli.Client) tea.Cmd {
+	return func() tea.Msg {
+		res := c.GHStatus(ctx)
+		if res.Err != nil {
+			return ghStatusMsg{err: res.Err}
+		}
+		if res.ExitCode != 0 {
+			text := res.Stderr
+			if text == "" {
+				text = res.Stdout
+			}
+			return ghStatusMsg{text: text}
+		}
+		return ghStatusMsg{text: res.Stdout}
+	}
+}
+
 // startLogTail opens a logtail.Tail on path and reports its initial lines
 // plus the update channel to keep following it. ctx should be a
 // child context the caller can cancel independently (switching runners, or
