@@ -175,6 +175,26 @@ cp .runnermaxxer.conf.sample .runnermaxxer.conf
 | `MAX_RESTART_ATTEMPTS` | Consecutive crashes before a runner is quarantined (default: 5) |
 | `MAX_LOG_SIZE_MB` | Truncate runner logs past this size (default: 10) |
 | `GH_HEALTH_TICKS` | GitHub-side health check every N ticks, 0 to disable (default: 12) |
+| `SHARED_TOOL_CACHE` | `1` = all runners share one tool cache in `runners/.toolcache` (default: 1). See [Shared Tool Cache](#shared-tool-cache) |
+| `EPHEMERAL_RUNNERS` | `1` = register new runners with `--ephemeral`, one job per registration (default: 0). See [Ephemeral Runners](#ephemeral-runners) |
+
+`SHARED_TOOL_CACHE` and `EPHEMERAL_RUNNERS` can also be toggled from the dashboard with `e`.
+
+### Shared Tool Cache
+
+Every runner is a full copy of the runner package, and by default each keeps its own tool cache in `_work/_tool`, so `actions/setup-node`, `setup-python`, etc. download the same toolchain once per runner. With `SHARED_TOOL_CACHE=1` every runner is launched with `RUNNER_TOOL_CACHE` and `AGENT_TOOLSDIRECTORY` pointing at `runners/.toolcache`. The runner resolves its tool directory from `RUNNER_TOOL_CACHE` (falling back to `RUNNER_TOOLSDIRECTORY`, then `AGENT_TOOLSDIRECTORY`; see `HostContext.cs` in [actions/runner](https://github.com/actions/runner)) and the setup-* actions read `RUNNER_TOOL_CACHE`; both are set to be safe. A value set in a runner's own `.env` file overrides this.
+
+- The change applies as runners (re)start (`r` restarts all).
+- Concurrent **first-time** installs of the same tool version by several runners can race (two jobs extracting into the same directory at once). Once a version is cached, sharing it is safe. If a job fails oddly during a tool install, re-run it, or pre-warm the cache with a single runner.
+- Deleting `runners/.toolcache` is safe (ideally while no jobs are running); tools are simply re-downloaded on next use.
+
+### Ephemeral Runners
+
+With `EPHEMERAL_RUNNERS=1`, new runners are registered with `--ephemeral`: each registration takes exactly one job, then the runner exits, GitHub deletes the registration, and the runner removes its local `.runner`/`.credentials`. This gives every job a registration of its own (no state carried in the runner's credentials between jobs; note the `_work` directory and tool cache on disk are still reused).
+
+The manager treats that exit as normal: the supervisor re-runs `config.sh` in the same runner directory (no re-extraction) and relaunches it right away, without counting it towards the crash/quarantine limit. The runner's project is remembered in `runners/.pids/runner-N.target`, so it stays listed under its project while between jobs. Ephemeral runners are tagged `ephemeral` in the dashboard, which is why they briefly show `restarting...` after each job. Removing one whose registration GitHub already deleted is fine and is not recorded as an orphan.
+
+The mode is fixed when a runner is set up: changing `EPHEMERAL_RUNNERS` only affects runners added afterwards. To switch an existing runner, remove it and add it again (e.g. scale its project down and back up).
 
 Older configs that still contain `REPO_URL`/`ORG_URL` are migrated automatically: the URL is appended to `.runnermaxxer.targets` and removed from the config.
 
@@ -220,7 +240,8 @@ gh-runnermaxxer/
     ├── runner-1/
     ├── runner-2/
     ├── .pids/
-    └── .logs/
+    ├── .logs/
+    └── .toolcache/              # Shared tool cache (SHARED_TOOL_CACHE=1)
 ```
 
 ## Troubleshooting

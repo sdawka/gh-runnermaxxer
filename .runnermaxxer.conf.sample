@@ -28,3 +28,15 @@ MAX_LOG_SIZE_MB="10"
 # recycle any that GitHub reports offline while the local process is alive.
 # Set to 0 to disable (default: 12, i.e. every ~60s)
 GH_HEALTH_TICKS="12"
+
+# Share one tool cache ($RUNNER_BASE_DIR/.toolcache) across all runners, so
+# actions like setup-node download a toolchain once instead of per runner.
+# Sets RUNNER_TOOL_CACHE and AGENT_TOOLSDIRECTORY for each runner.
+# Takes effect as runners (re)start. Deleting .toolcache is safe (default: 1)
+SHARED_TOOL_CACHE="1"
+
+# Register NEW runners as ephemeral (--ephemeral): each takes exactly one
+# job, then GitHub deletes its registration and the manager re-registers it
+# in the same directory for the next job. Existing runners keep the mode
+# they were set up with; remove and re-add them to switch (default: 0)
+EPHEMERAL_RUNNERS="0"
