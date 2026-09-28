@@ -10,11 +10,11 @@ import (
 
 // ErrNeedsUpgrade is returned by Load/Parse when the snapshot has no
 // "schema" field at all, meaning it was written by a runnermaxxer.sh older
-// than the version that introduced state.json (< 3.1.0).
+// than the version that introduced state.json (< 4.0.0).
 type ErrNeedsUpgrade struct{}
 
 func (ErrNeedsUpgrade) Error() string {
-	return "state.json has no \"schema\" field: needs runnermaxxer.sh >= 3.1.0"
+	return "state.json has no \"schema\" field: needs runnermaxxer.sh >= 4.0.0"
 }
 
 // ErrSchemaTooNew is returned when the snapshot declares a schema version

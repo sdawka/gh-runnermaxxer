@@ -15,7 +15,7 @@ fi
 
 set -euo pipefail
 
-VERSION="3.1.0"
+VERSION="4.0.0"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/.runnermaxxer.conf"
