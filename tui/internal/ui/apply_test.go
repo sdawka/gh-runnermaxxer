@@ -22,7 +22,7 @@ func TestApplyPendingNoopWhenEmpty(t *testing.T) {
 
 func TestApplyPendingRunsScaleAndClearsInflightOnResult(t *testing.T) {
 	f := &fakeRunner{}
-	snap := state.Snapshot{Targets: []state.Target{{URL: urlA, Have: 2}}}
+	snap := state.Snapshot{Targets: []state.Target{{URL: urlA, Want: 2, Have: 2}}}
 	m := newActionsTestModel(f, snap)
 	m.Pending.values = map[string]int{urlA: 5}
 
@@ -63,7 +63,7 @@ func TestApplyPendingRunsScaleAndClearsInflightOnResult(t *testing.T) {
 
 func TestApplyPendingRefusesWhileAlreadyInflight(t *testing.T) {
 	f := &fakeRunner{}
-	snap := state.Snapshot{Targets: []state.Target{{URL: urlA, Have: 2}}}
+	snap := state.Snapshot{Targets: []state.Target{{URL: urlA, Want: 2, Have: 2}}}
 	m := newActionsTestModel(f, snap)
 	m.Pending.values = map[string]int{urlA: 5}
 	m.Inflight[targetKey(urlA)] = Op{Verb: "scale"}
@@ -86,7 +86,7 @@ func TestCmdResultTriggersReload(t *testing.T) {
 
 func TestRenderTargetRowShowsSpinnerWhenInflight(t *testing.T) {
 	f := &fakeRunner{}
-	snap := state.Snapshot{Targets: []state.Target{{URL: urlA, Have: 2, Label: "a/a"}}}
+	snap := state.Snapshot{Targets: []state.Target{{URL: urlA, Want: 2, Have: 2, Label: "a/a"}}}
 	m := newActionsTestModel(f, snap)
 	m.Inflight[targetKey(urlA)] = Op{Verb: "scale"}
 

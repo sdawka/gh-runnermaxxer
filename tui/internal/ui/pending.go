@@ -8,9 +8,13 @@ import (
 
 // PendingCounts tracks in-progress scale edits the way the bash TUI's
 // M_WANT/M_CUR pair does (Go design doc §2.5): an entry for a target exists
-// only while it differs from that target's current Have, so an autoscale
-// change happening underneath the user doesn't look like a pending edit,
-// and Enter applies / Esc discards the whole set in one step.
+// only while it differs from that target's server-reported Want (the count
+// the daemon was last asked for), not its Have (the count actually running).
+// Reconciling against Want means an edit clears the moment the daemon
+// accepts it, even if new runners are still spinning up - and a slow or
+// failed convergence (Have lagging Want) never looks like an unapplied
+// local edit. An autoscale change happening underneath the user, or another
+// client's own apply, drops the entry the same way.
 type PendingCounts struct {
 	values map[string]int
 }
@@ -55,11 +59,12 @@ func (p *PendingCounts) Changes() map[string]int {
 	return out
 }
 
-// store keeps n as url's pending value unless it equals have, in which case
-// the entry is dropped - this is what makes reconciliation automatic
-// instead of needing a special case ("d decrements pending", §4.4).
-func (p *PendingCounts) store(url string, have, n int) {
-	if n == have {
+// store keeps n as url's pending value unless it equals want (the target's
+// current server-reported Want), in which case the entry is dropped - this
+// is what makes reconciliation automatic instead of needing a special case
+// ("d decrements pending", §4.4).
+func (p *PendingCounts) store(url string, want, n int) {
+	if n == want {
 		delete(p.values, url)
 		return
 	}
@@ -71,7 +76,7 @@ func (p *PendingCounts) store(url string, have, n int) {
 // is false (with a message to toast) when the guard rejects the change,
 // matching menu_adjust's MAX_RUNNERS message.
 func (p *PendingCounts) Adjust(snap state.Snapshot, url string, delta int) (ok bool, msg string) {
-	current := p.Get(url, targetHave(snap, url))
+	current := p.Get(url, targetWant(snap, url))
 	return p.Set(snap, url, current+delta)
 }
 
@@ -81,39 +86,40 @@ func (p *PendingCounts) Set(snap state.Snapshot, url string, n int) (ok bool, ms
 	if n < 0 {
 		n = 0
 	}
-	have := targetHave(snap, url)
-	total := p.TotalAfter(snap) - p.Get(url, have) + n
+	want := targetWant(snap, url)
+	total := p.TotalAfter(snap) - p.Get(url, want) + n
 	if snap.MaxRunners > 0 && total > snap.MaxRunners {
 		return false, fmt.Sprintf("MAX_RUNNERS (%d) reached - raise it in .runnermaxxer.conf", snap.MaxRunners)
 	}
-	p.store(url, have, n)
+	p.store(url, want, n)
 	return true, ""
 }
 
-// Reconcile drops any pending entry that now matches the snapshot's Have -
-// an apply completed, or autoscale (or another actor) moved it there on
-// its own.
+// Reconcile drops any pending entry that now matches the snapshot's Want -
+// the daemon accepted the apply (even if Have hasn't caught up yet), or
+// autoscale (or another actor) requested that value on its own.
 func (p *PendingCounts) Reconcile(snap state.Snapshot) {
 	for url, n := range p.values {
-		if t, ok := snap.TargetByURL(url); ok && t.Have == n {
+		if t, ok := snap.TargetByURL(url); ok && t.Want == n {
 			delete(p.values, url)
 		}
 	}
 }
 
 // TotalAfter sums, across every target in snap, the pending count if one
-// exists else Have - i.e. what the fleet converges to if applied now.
+// exists else Want - i.e. what the fleet will be asked to converge to if
+// applied now.
 func (p *PendingCounts) TotalAfter(snap state.Snapshot) int {
 	total := 0
 	for _, t := range snap.Targets {
-		total += p.Get(t.URL, t.Have)
+		total += p.Get(t.URL, t.Want)
 	}
 	return total
 }
 
-func targetHave(snap state.Snapshot, url string) int {
+func targetWant(snap state.Snapshot, url string) int {
 	if t, ok := snap.TargetByURL(url); ok {
-		return t.Have
+		return t.Want
 	}
 	return 0
 }

@@ -60,12 +60,12 @@ func TestUpdateSnapshotMsgReconcilesPending(t *testing.T) {
 	m := newTestModel()
 	m.Pending.values = map[string]int{urlA: 4}
 
-	snap := state.Snapshot{Targets: []state.Target{{URL: urlA, Have: 4}}, DaemonPID: 123}
+	snap := state.Snapshot{Targets: []state.Target{{URL: urlA, Want: 4, Have: 4}}, DaemonPID: 123}
 	updated, _ := m.Update(snapshotMsg{snap: snap})
 	got := updated.(Model)
 
 	if got.Pending.IsPending(urlA) {
-		t.Error("pending entry survived a snapshot where Have caught up")
+		t.Error("pending entry survived a snapshot where Want caught up")
 	}
 	if !got.DaemonUp {
 		t.Error("DaemonUp = false, want true (DaemonPID != 0)")
@@ -114,7 +114,7 @@ func TestUpdateHelpToggle(t *testing.T) {
 
 func TestUpdateCountKeysOnCursorTarget(t *testing.T) {
 	m := newTestModel()
-	m.Snap = state.Snapshot{MaxRunners: 20, Targets: []state.Target{{URL: urlA, Have: 2}}}
+	m.Snap = state.Snapshot{MaxRunners: 20, Targets: []state.Target{{URL: urlA, Want: 2, Have: 2}}}
 	m.Cursor = 0
 
 	updated, _ := m.Update(tea.KeyPressMsg{Text: "+"})

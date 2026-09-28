@@ -62,8 +62,17 @@ func (m Model) renderTargetRow(t state.Target, selected bool, labelWidth int) st
 	have := t.Have
 	pending := m.Pending.Get(t.URL, have)
 	countStr := fmt.Sprintf("%d", have)
-	if pending != have {
+	switch {
+	case pending != have:
+		// A local edit differs from what's currently running: show where
+		// it's headed once applied.
 		countStr = m.Theme.Pending.Render(fmt.Sprintf("%d -> %d", have, pending))
+	case t.Want != have:
+		// No local edit, but the daemon's own Want differs from Have: a
+		// scale it already accepted (ours or someone else's, or autoscale)
+		// is still converging. Distinct from a TUI pending edit (§ gap
+		// flagged after commit 7).
+		countStr = m.Theme.Dim.Render(fmt.Sprintf("%d/%d", have, t.Want))
 	}
 	if _, inflight := m.Inflight[targetKey(t.URL)]; inflight {
 		countStr = m.Spinner.View() + " " + countStr
