@@ -2762,6 +2762,8 @@ sanitize_settings() {
     [[ "$MAX_RUNNERS" =~ ^[0-9]+$ && "$MAX_RUNNERS" -ge 1 ]] || MAX_RUNNERS=20
     [[ "$SHARED_TOOL_CACHE" =~ ^[01]$ ]] || SHARED_TOOL_CACHE=1
     [[ "$EPHEMERAL_RUNNERS" =~ ^[01]$ ]] || EPHEMERAL_RUNNERS=0
+    [[ "$AUTOSCALE" =~ ^[01]$ ]] || AUTOSCALE=0
+    [[ "$AUTOSCALE_IDLE_MINUTES" =~ ^[0-9]+$ ]] || AUTOSCALE_IDLE_MINUTES=10
     return 0
 }
 
