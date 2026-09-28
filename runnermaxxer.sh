@@ -15,7 +15,7 @@ fi
 
 set -euo pipefail
 
-VERSION="3.0.0"
+VERSION="3.1.0-dev"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/.runnermaxxer.conf"
@@ -89,6 +89,8 @@ cleanup() {
         rm -f "$LOCK_FILE"
     fi
     [[ "$OP_LOCK_ACQUIRED" == "1" ]] && rm -f "$OP_LOCK_FILE"
+    # Per-process gh scratch files (see gh_api)
+    rm -f "$PID_DIR/.gh.last.$$" "$PID_DIR/.gh.hdr.$$" 2>/dev/null || true
     if [[ "$DAEMON_MODE" == "1" && "$(cat "$DAEMON_PID_FILE" 2>/dev/null)" == "$$" ]]; then
         rm -f "$DAEMON_PID_FILE"
     fi
@@ -266,8 +268,9 @@ download_runner_tarball() {
     info "Fetching latest runner release for ${RUNNER_OS}-${RUNNER_ARCH}..."
 
     local tag
-    tag=$(gh api repos/actions/runner/releases/latest --jq .tag_name 2>/dev/null) || {
-        warn "Could not query the latest runner release (network/auth issue?)"
+    tag=$(latest_runner_tag refresh) || {
+        gh_last_load
+        warn "Could not query the latest runner release: $(gh_error_note "$GH_CLASS" "$GH_MSG")"
         return 1
     }
 
@@ -275,15 +278,15 @@ download_runner_tarball() {
     local asset="actions-runner-${RUNNER_OS}-${RUNNER_ARCH}-${ver}.tar.gz"
 
     info "Downloading $asset..."
-    if ! gh release download "$tag" -R actions/runner --pattern "$asset" --dir "$SCRIPT_DIR" --clobber; then
+    if ! "$GH_BIN" release download "$tag" -R actions/runner --pattern "$asset" --dir "$SCRIPT_DIR" --clobber; then
         warn "Download failed. Get it manually from https://github.com/actions/runner/releases"
         return 1
     fi
 
     # Verify checksum against the SHA published in the release notes
     local expected actual
-    expected=$(gh api "repos/actions/runner/releases/tags/$tag" --jq .body 2>/dev/null \
-        | sed -n "s/.*BEGIN SHA ${RUNNER_OS}-${RUNNER_ARCH} -->\([a-f0-9]\{64\}\)<.*/\1/p" | head -1)
+    expected=$(gh_api "repos/actions/runner/releases/tags/$tag" --jq .body \
+        | sed -n "s/.*BEGIN SHA ${RUNNER_OS}-${RUNNER_ARCH} -->\([a-f0-9]\{64\}\)<.*/\1/p" | head -1) || expected=""
     if [[ -n "$expected" ]]; then
         actual=$(sha256_file "$SCRIPT_DIR/$asset")
         if [[ -n "$actual" && "$actual" != "$expected" ]]; then
@@ -293,46 +296,63 @@ download_runner_tarball() {
         fi
         echo -e "${GREEN}✓${NC} Checksum verified"
     else
-        warn "Could not find published checksum - skipping verification"
+        warn "Couldn't find the checksum in the release notes for $tag - installed without verification"
     fi
 
     echo -e "${GREEN}✓${NC} Downloaded $asset"
     return 0
 }
 
+# Latest actions/runner release tag (e.g. v2.337.0). Cached in
+# $RUNNER_BASE_DIR/.latest-runner-tag (epoch + tag, one per line) and reused
+# for 24h so this doesn't add a network round-trip to every launch or poll.
+# latest_runner_tag [refresh] prints the tag, or nothing (returning 1) when
+# it can't be found out; "refresh" skips the cache.
+latest_runner_tag() {
+    local cache_file="$RUNNER_BASE_DIR/.latest-runner-tag" now cached_epoch cached_tag tag
+    now=$(date -u +%s 2>/dev/null) || return 1
+    if [[ "${1:-}" != "refresh" && -f "$cache_file" ]]; then
+        cached_epoch=$(sed -n '1p' "$cache_file" 2>/dev/null)
+        cached_tag=$(sed -n '2p' "$cache_file" 2>/dev/null)
+        if [[ "$cached_epoch" =~ ^[0-9]+$ && -n "$cached_tag" && $(( now - cached_epoch )) -lt 86400 ]]; then
+            printf '%s\n' "$cached_tag"
+            return 0
+        fi
+    fi
+    tag=$(gh_api repos/actions/runner/releases/latest --jq .tag_name) || return 1
+    [[ -n "$tag" ]] || return 1
+    { echo "$now"; echo "$tag"; } > "$cache_file" 2>/dev/null || true
+    printf '%s\n' "$tag"
+}
+
+# The cached tag only, never calling gh (for the state snapshot)
+cached_latest_runner_tag() {
+    local tag
+    tag=$(sed -n '2p' "$RUNNER_BASE_DIR/.latest-runner-tag" 2>/dev/null) || tag=""
+    [[ -n "$tag" ]] || return 1
+    printf '%s\n' "$tag"
+}
+
+# Version in a runner tarball's file name (actions-runner-OS-ARCH-VER.tar.gz)
+tarball_version() {
+    local base
+    base=$(basename "${1:-}")
+    printf '%s' "$base" | sed -n 's/^actions-runner-[a-z]*-[a-z0-9]*-\(.*\)\.tar\.gz$/\1/p'
+}
+
 # Best-effort, non-fatal check: warn once at startup if the shipped tarball
 # is older than the latest actions/runner release. Never blocks startup and
 # never errors out (offline, no gh auth, etc. all just skip silently).
-# The latest-tag lookup is cached in $RUNNER_BASE_DIR/.latest-runner-tag
-# (epoch + tag, one per line) and reused for 24h so this doesn't add a
-# network round-trip to every launch.
 check_tarball_freshness() {
     [[ -n "$RUNNER_TAR" ]] || return 0
-    command -v gh >/dev/null 2>&1 || return 0
+    command -v "$GH_BIN" >/dev/null 2>&1 || return 0
 
-    local base current_ver cache_file now cached_epoch cached_tag latest_tag latest_ver
+    local base current_ver latest_tag latest_ver
     base=$(basename "$RUNNER_TAR")
     current_ver=$(echo "$base" | sed -n "s/^actions-runner-${RUNNER_OS}-${RUNNER_ARCH}-\(.*\)\.tar\.gz\$/\1/p")
     [[ -n "$current_ver" ]] || return 0
 
-    cache_file="$RUNNER_BASE_DIR/.latest-runner-tag"
-    now=$(date -u +%s 2>/dev/null) || return 0
-    latest_tag=""
-
-    if [[ -f "$cache_file" ]]; then
-        cached_epoch=$(sed -n '1p' "$cache_file" 2>/dev/null)
-        cached_tag=$(sed -n '2p' "$cache_file" 2>/dev/null)
-        if [[ "$cached_epoch" =~ ^[0-9]+$ && -n "$cached_tag" && $(( now - cached_epoch )) -lt 86400 ]]; then
-            latest_tag="$cached_tag"
-        fi
-    fi
-
-    if [[ -z "$latest_tag" ]]; then
-        latest_tag=$(gh api repos/actions/runner/releases/latest --jq .tag_name 2>/dev/null) || return 0
-        [[ -n "$latest_tag" ]] || return 0
-        { echo "$now"; echo "$latest_tag"; } > "$cache_file" 2>/dev/null || true
-    fi
-
+    latest_tag=$(latest_runner_tag) || return 0
     latest_ver="${latest_tag#v}"
     if [[ -n "$latest_ver" && "$latest_ver" != "$current_ver" ]]; then
         echo -e "${YELLOW}Runner tarball is $current_ver, latest is $latest_ver - run ./runnermaxxer.sh --download to update (new runners only)${NC}"
@@ -661,14 +681,17 @@ target_api_endpoint() {
     fi
 }
 
-# Can the gh token see this repo/org?
+# Can the gh token see this repo/org? Returns gh's status; on failure
+# GH_CLASS says why and the target gets an error record.
 target_accessible() {
-    local path="${1#https://github.com/}"
+    local path="${1#https://github.com/}" rc=0
     if [[ "$(target_type "$1")" == "repo" ]]; then
-        gh api "repos/$path" >/dev/null 2>&1
+        gh_api "repos/$path" >/dev/null || rc=$?
     else
-        gh api "orgs/$path" >/dev/null 2>&1
+        gh_api "orgs/$path" >/dev/null || rc=$?
     fi
+    [[ $rc -eq 0 ]] || target_set_error "$1" "$GH_CLASS" "$GH_MSG"
+    return $rc
 }
 
 # Short display form: owner/repo, or "org (organization)"
@@ -882,7 +905,7 @@ scale_target() {
 
     if [[ $want -gt $cur ]]; then
         if ! target_accessible "$url"; then
-            echo -e "  ${RED}✗${NC} $label: the gh token cannot access it - check it exists and your auth scopes"
+            echo -e "  ${RED}✗${NC} $label: $(gh_error_note "$GH_CLASS" "$GH_MSG")"
             return 1
         fi
         echo -e "  ${BLUE}$label: adding $((want - cur)) runner(s)...${NC}"
@@ -1384,7 +1407,7 @@ preflight_checks() {
 
     # Required commands
     local cmd
-    for cmd in gh tar pgrep pkill ps; do
+    for cmd in "$GH_BIN" tar pgrep pkill ps; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
             echo -e "${RED}✗ Missing required command: $cmd${NC}" >&2
             errors=$((errors + 1))
@@ -1392,10 +1415,15 @@ preflight_checks() {
     done
 
     # gh authentication
-    if command -v gh >/dev/null 2>&1; then
-        if ! gh auth status >/dev/null 2>&1; then
+    if command -v "$GH_BIN" >/dev/null 2>&1; then
+        if ! "$GH_BIN" auth status >/dev/null 2>&1; then
             echo -e "${RED}✗ gh CLI is not authenticated. Run: gh auth login${NC}" >&2
             errors=$((errors + 1))
+        else
+            # Who, which scopes, and per-target permission. A missing scope
+            # is recorded against the target (and shown), not fatal: other
+            # targets may be fine and the token can be refreshed later.
+            gh_auth_probe || true
         fi
     fi
 
@@ -1451,11 +1479,334 @@ preflight_checks() {
     fi
 }
 
-get_pat() {
-    local token
-    token=$(gh auth token 2>/dev/null) || return 1
-    [[ -z "$token" ]] && return 1
-    echo "$token"
+# ============================================================================
+# GitHub API access
+# ============================================================================
+# Every API call goes through gh_api, which classifies failures once:
+#   GH_CLASS  ok | auth | sso | ratelimit | forbidden | notfound | network | error
+#   GH_HTTP   HTTP status parsed from gh's "(HTTP NNN)" suffix, or empty
+#   GH_MSG    first line of gh's stderr, without the "gh: " prefix
+# gh_api sets these in the calling shell. A caller that captured the output
+# with $(...) ran it in a subshell, so it calls gh_last_load afterwards to
+# read them back ($$ is the same in subshells, so the per-process file
+# .gh.last.$$ carries them across).
+# Files in $PID_DIR:
+#   gh.last   class<TAB>http<TAB>msg of the most recent call (any process)
+#   gh.err    same, for the last *global* failure (auth/sso/ratelimit/
+#             network/error); removed by the next successful call.
+#             notfound/forbidden are per target (target-KEY.err) instead.
+#   gh.state, gh.msg, gh.user, gh.host, gh.scopes, gh.checked
+#             written by gh_auth_probe
+
+# `"$GH_BIN" api ...` (not `command gh`) so a gh() function defined by the
+# tests still intercepts the call. A service install bakes an absolute path
+# in through RUNNERMAXXER_GH.
+GH_BIN="${RUNNERMAXXER_GH:-gh}"
+GH_CLASS=""; GH_HTTP=""; GH_MSG=""
+GH_HDR_FILE=""
+
+# gh_classify RC HTTP MSG - pure; sets GH_CLASS
+gh_classify() {
+    local rc=$1 http=$2 msg re
+    msg=$(lower "$3")
+    if [[ "$rc" == "0" ]]; then GH_CLASS=ok; return 0; fi
+    re='not logged in|gh auth login|bad credentials|token.*expired|requires authentication'
+    if [[ "$rc" == "4" || "$http" == "401" || "$msg" =~ $re ]]; then GH_CLASS=auth; return 0; fi
+    re='rate limit'
+    if [[ "$http" == "429" ]] || [[ "$http" == "403" && "$msg" =~ $re ]]; then GH_CLASS=ratelimit; return 0; fi
+    re='saml'
+    if [[ "$http" == "403" && "$msg" =~ $re ]]; then GH_CLASS=sso; return 0; fi
+    case "$http" in
+        403) GH_CLASS=forbidden; return 0 ;;
+        404) GH_CLASS=notfound; return 0 ;;
+    esac
+    re='dial tcp|no such host|connection refused|timeout|timed out|tls|unreachable|network|error connecting'
+    if [[ -z "$http" && "$msg" =~ $re ]]; then GH_CLASS=network; return 0; fi
+    GH_CLASS=error
+    return 0
+}
+
+# gh_set_last CLASS HTTP MSG - record a call result (see the comment above)
+gh_set_last() {
+    local line
+    GH_CLASS=$1; GH_HTTP=$2; GH_MSG=$3
+    line=$(printf '%s\t%s\t%s' "$GH_CLASS" "$GH_HTTP" "$GH_MSG")
+    mkdir -p "$PID_DIR" 2>/dev/null || true
+    printf '%s\n' "$line" > "$PID_DIR/.gh.last.$$" 2>/dev/null || true
+    printf '%s\n' "$line" > "$PID_DIR/gh.last" 2>/dev/null || true
+    case "$GH_CLASS" in
+        ok) rm -f "$PID_DIR/gh.err" ;;
+        auth|sso|ratelimit|network|error)
+            printf '%s\t%s\n' "$line" "$(date +%s)" > "$PID_DIR/gh.err" 2>/dev/null || true ;;
+    esac
+    return 0
+}
+
+# Read back GH_CLASS/GH_HTTP/GH_MSG after a gh_api call made in a subshell
+gh_last_load() {
+    local line rest
+    line=$(cat "$PID_DIR/.gh.last.$$" 2>/dev/null) || return 0
+    GH_CLASS=${line%%$'\t'*}; rest=${line#*$'\t'}
+    GH_HTTP=${rest%%$'\t'*}; GH_MSG=${rest#*$'\t'}
+    return 0
+}
+
+# _gh_run ARGS... : run gh, pass stdout through, classify stderr
+_gh_run() {
+    local errf rc=0 http msg line
+    mkdir -p "$PID_DIR" 2>/dev/null || true
+    errf="$PID_DIR/.gh.stderr.$$.$RANDOM"
+    [[ -d "$PID_DIR" ]] || errf="${TMPDIR:-/tmp}/runnermaxxer-gh.$$.$RANDOM"
+    "$GH_BIN" "$@" 2>"$errf" || rc=$?
+    http=$(sed -n 's/.*(HTTP \([0-9][0-9][0-9]\)).*/\1/p' "$errf" 2>/dev/null | head -1) || http=""
+    msg=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        [[ -n "${line//[[:space:]]/}" ]] || continue
+        msg="${line#gh: }"
+        break
+    done < "$errf"
+    rm -f "$errf"
+    msg="${msg:0:200}"
+    gh_classify "$rc" "$http" "$msg"
+    # SAML SSO: the authorize URL is only in a response header
+    if [[ "$GH_CLASS" == "sso" && "$1" == "api" && "${2:-}" != "-i" ]]; then
+        local sso
+        shift
+        sso=$({ "$GH_BIN" api -i "$@" 2>/dev/null || true; } | tr -d '\r' \
+            | sed -n 's/^[Xx]-[Gg]it[Hh]ub-[Ss][Ss][Oo]:.*url=\([^ ;]*\).*/\1/p' | head -1) || sso=""
+        [[ -n "$sso" ]] && msg="$msg - authorize: $sso"
+    fi
+    gh_set_last "$GH_CLASS" "$http" "$msg"
+    return $rc
+}
+
+# gh_api ARGS... : `gh api ARGS`; exit status is gh's
+gh_api() {
+    _gh_run api "$@"
+}
+
+# gh_api_hdr ARGS... : `gh api -i ARGS`; the response headers go to
+# $PID_DIR/.gh.hdr.$$ (read them with gh_header, also after a $(...)
+# call), the body to stdout
+gh_api_hdr() {
+    local outf rc=0
+    mkdir -p "$PID_DIR" 2>/dev/null || true
+    GH_HDR_FILE="$PID_DIR/.gh.hdr.$$"
+    outf="$PID_DIR/.gh.out.$$.$RANDOM"
+    _gh_run api -i "$@" > "$outf" || rc=$?
+    : > "$GH_HDR_FILE"
+    # gh prints the status line and headers with CRLF, then a blank line
+    tr -d '\r' < "$outf" | awk -v h="$GH_HDR_FILE" '
+        hd == 0 && /^$/ { hd = 1; next }
+        hd == 0         { print > h; next }
+                        { print }'
+    rm -f "$outf"
+    return $rc
+}
+
+# gh_header NAME : value of one response header (case-insensitive) from the
+# last gh_api_hdr call (or $GH_HDR_FILE when set); returns 1 when the
+# header is absent
+gh_header() {
+    local v f="${GH_HDR_FILE:-$PID_DIR/.gh.hdr.$$}"
+    [[ -f "$f" ]] || return 1
+    v=$(tr -d '\r' < "$f" | awk -v n="$(lower "$1")" '
+        { k = $0; sub(/:.*/, "", k) }
+        tolower(k) == n { sub(/^[^:]*:[ \t]*/, ""); print; found = 1; exit }
+        END { exit found ? 0 : 1 }') || return 1
+    printf '%s\n' "$v"
+}
+
+# One line of human text per class, for lasterr, target errors and output
+gh_error_note() {
+    local class=$1 msg=${2:-} note
+    case "$class" in
+        ok)        note="ok" ;;
+        auth)      note="gh is not logged in or its token was rejected - run: gh auth login" ;;
+        sso)       note="the organization enforces SAML SSO - authorize the gh token for it" ;;
+        ratelimit) note="GitHub API rate limit reached - retrying after it resets" ;;
+        forbidden) note="GitHub refused access (403) - the token lacks admin rights or scopes" ;;
+        notfound)  note="not found or no read access (404) - renamed, deleted, or access lost?" ;;
+        network)   note="cannot reach GitHub (network)" ;;
+        scope)     note="" ;;
+        *)         note="gh failed" ;;
+    esac
+    if [[ -n "$msg" ]]; then
+        if [[ -n "$note" ]]; then note="$note ($msg)"; else note="$msg"; fi
+    fi
+    [[ -n "$note" ]] || note="$class"
+    printf '%s\n' "$note"
+}
+
+# ----------------------------------------------------------------------------
+# Per-target errors: $PID_DIR/target-KEY.err = class<TAB>msg<TAB>since_epoch
+# class: notfound | forbidden | sso | scope | ratelimit | network | error | auth
+# ----------------------------------------------------------------------------
+
+target_err_file() { echo "$PID_DIR/target-$(target_key "$1").err"; }
+
+# target_set_error URL CLASS MSG - "since" is kept while the class is unchanged
+target_set_error() {
+    local f cls=$2 msg=${3:-} since old
+    f=$(target_err_file "$1")
+    msg=$(printf '%s' "$msg" | tr '\t\n\r' '   ')
+    since=$(date +%s)
+    old=$(cut -f1,3 "$f" 2>/dev/null) || old=""
+    if [[ -n "$old" && "${old%%$'\t'*}" == "$cls" && "${old#*$'\t'}" =~ ^[0-9]+$ ]]; then
+        since=${old#*$'\t'}
+    fi
+    mkdir -p "$PID_DIR" 2>/dev/null || true
+    printf '%s\t%s\t%s\n' "$cls" "$msg" "$since" > "$f" 2>/dev/null || true
+    return 0
+}
+
+# target_clear_error URL [CLASS] - with CLASS, only an error of that class
+target_clear_error() {
+    local f
+    f=$(target_err_file "$1")
+    [[ -f "$f" ]] || return 0
+    if [[ -n "${2:-}" && "$(cut -f1 "$f" 2>/dev/null)" != "$2" ]]; then
+        return 0
+    fi
+    rm -f "$f"
+    return 0
+}
+
+# Clear a target's error unless it is of class CLASS
+target_clear_error_except() {
+    local f
+    f=$(target_err_file "$1")
+    [[ -f "$f" ]] || return 0
+    [[ "$(cut -f1 "$f" 2>/dev/null)" == "$2" ]] && return 0
+    rm -f "$f"
+    return 0
+}
+
+# target_error URL : prints "class<TAB>msg", or nothing
+target_error() {
+    local f
+    f=$(target_err_file "$1")
+    [[ -f "$f" ]] || return 0
+    cut -f1,2 "$f" 2>/dev/null || true
+    return 0
+}
+
+# Human text for a target's stored error (empty when none)
+target_error_note() {
+    local e
+    e=$(target_error "$1")
+    [[ -n "$e" ]] || return 0
+    gh_error_note "${e%%$'\t'*}" "${e#*$'\t'}"
+}
+
+# ----------------------------------------------------------------------------
+# Registration tokens: short-lived (1 h), single-purpose, minted per runner
+# right before config.sh, so the user's own token never reaches its argv
+# ----------------------------------------------------------------------------
+
+# _runner_token KIND URL - KIND is registration-token or remove-token
+_runner_token() {
+    local kind=$1 url=$2 tok rc=0 old
+    tok=$(gh_api -X POST "$(target_api_endpoint "$url")/$kind" --jq .token) || rc=$?
+    gh_last_load
+    if [[ $rc -eq 0 && -z "$tok" ]]; then
+        gh_set_last error "" "GitHub returned no $kind"
+        rc=1
+    fi
+    if [[ $rc -ne 0 ]]; then
+        # Keep the probe's clearer "scope" diagnosis over a bare 403
+        old=$(target_error "$url"); old=${old%%$'\t'*}
+        if [[ "$old" != "scope" || "$GH_CLASS" != "forbidden" ]]; then
+            target_set_error "$url" "$GH_CLASS" "$GH_MSG"
+        fi
+        return 1
+    fi
+    target_clear_error "$url" scope
+    printf '%s\n' "$tok"
+}
+
+registration_token() { _runner_token registration-token "$1"; }
+remove_token()       { _runner_token remove-token "$1"; }
+
+# ----------------------------------------------------------------------------
+# Scope probe
+# ----------------------------------------------------------------------------
+# gh_auth_probe [quiet] - who is logged in, with which scopes, and can the
+# token register runners for each known target? Writes gh.* files and per
+# target "scope" errors; never exits. Classic tokens list their scopes in
+# X-OAuth-Scopes: an org target needs admin:org, a repo target repo.
+# Fine-grained PATs / app tokens send no such header, so for those a
+# registration token is minted per target instead (403 = not allowed; the
+# unused token expires on its own after an hour).
+gh_auth_probe() {
+    local quiet=${1:-} body rc=0 user scopes host t need has_hdr=1 now line note
+    mkdir -p "$PID_DIR" 2>/dev/null || true
+    now=$(date +%s)
+    host=${GH_HOST:-github.com}
+    echo "$host" > "$PID_DIR/gh.host"
+    echo "$now" > "$PID_DIR/gh.checked"
+
+    GH_HDR_FILE=""
+    body=$(gh_api_hdr user) || rc=$?
+    gh_last_load
+    if [[ $rc -ne 0 ]]; then
+        [[ "$GH_CLASS" == "ok" ]] && GH_CLASS=error
+        echo "$GH_CLASS" > "$PID_DIR/gh.state"
+        printf '%s\n' "$GH_MSG" > "$PID_DIR/gh.msg"
+        [[ "$quiet" == "quiet" ]] || echo -e "${RED}✗ gh: $(gh_error_note "$GH_CLASS" "$GH_MSG")${NC}" >&2
+        return 1
+    fi
+    user=$(printf '%s\n' "$body" | sed -n 's/.*"login": *"\([^"]*\)".*/\1/p' | head -1)
+    scopes=$(gh_header X-OAuth-Scopes) || has_hdr=0
+    scopes=$(printf '%s' "$scopes" | tr -d ' \t')
+    printf '%s\n' "$user" > "$PID_DIR/gh.user"
+    printf '%s\n' "$scopes" > "$PID_DIR/gh.scopes"
+    echo ok > "$PID_DIR/gh.state"
+    rm -f "$PID_DIR/gh.msg"
+
+    for t in $(known_targets); do
+        if [[ $has_hdr -eq 1 ]]; then
+            need=repo
+            [[ "$(target_type "$t")" == "org" ]] && need="admin:org"
+            if [[ ",$scopes," == *",$need,"* ]]; then
+                target_clear_error "$t" scope
+            else
+                target_set_error "$t" scope "token lacks the $need scope - run: gh auth refresh -h $host -s $need"
+            fi
+        elif registration_token "$t" >/dev/null; then
+            target_clear_error "$t" scope
+        else
+            gh_last_load
+            if [[ "$GH_CLASS" == "forbidden" ]]; then
+                target_set_error "$t" scope "token cannot register runners here (403) - it needs admin rights (fine-grained: 'Administration' for a repo, 'Self-hosted runners' for an org)"
+            fi
+        fi
+    done
+
+    if [[ "$quiet" != "quiet" ]]; then
+        if [[ $has_hdr -eq 1 ]]; then
+            echo -e "${GREEN}✓${NC} gh: ${user:-?} (${scopes//,/, })"
+        else
+            echo -e "${GREEN}✓${NC} gh: ${user:-?} (no scope list - fine-grained or app token)"
+        fi
+        for t in $(known_targets); do
+            line=$(target_error "$t")
+            [[ -n "$line" ]] || continue
+            note=$(gh_error_note "${line%%$'\t'*}" "${line#*$'\t'}")
+            echo -e "${YELLOW}⚠ $(target_label "$t"): $note${NC}" >&2
+        done
+    fi
+    return 0
+}
+
+# Current gh state for display: a sticky global error wins over the probe
+gh_state() {
+    local e s
+    e=$(cut -f1 "$PID_DIR/gh.err" 2>/dev/null) || e=""
+    if [[ -n "$e" ]]; then echo "$e"; return 0; fi
+    s=$(cat "$PID_DIR/gh.state" 2>/dev/null) || s=""
+    echo "${s:-unknown}"
 }
 
 
@@ -1602,7 +1953,8 @@ clear_runner_state() {
           "$PID_DIR/runner-$1.laststart" \
           "$PID_DIR/runner-$1.target" \
           "$PID_DIR/runner-$1.name" \
-          "$PID_DIR/runner-$1.ephemeral"
+          "$PID_DIR/runner-$1.ephemeral" \
+          "$PID_DIR/runner-$1.version"
 }
 
 # After a manager crash/restart, PID files may be stale while runner
@@ -1826,11 +2178,17 @@ check_github_health() {
     local t endpoint rows online id name gbusy cnt now started polled=0
     now=$(date +%s)
 
+    # A broken token is re-probed once per poll, so the state recovers by
+    # itself after `gh auth login` (the probe is skipped while things work)
+    [[ "$(gh_state)" == "ok" ]] || gh_auth_probe quiet || true
+
     for t in $(known_targets); do
         [[ -n "$(runner_ids_for_target "$t")" ]] || continue
         endpoint=$(target_api_endpoint "$t")
         # One pass: name<TAB>status<TAB>busy per registered runner
-        if ! rows=$(gh api --paginate "$endpoint" --jq '.runners[] | "\(.name)\t\(.status)\t\(.busy)"' 2>/dev/null); then
+        if ! rows=$(gh_api --paginate "$endpoint" --jq '.runners[] | "\(.name)\t\(.status)\t\(.busy)"'); then
+            gh_last_load
+            target_set_error "$t" "$GH_CLASS" "$GH_MSG"
             # No API view for this target: drop its markers so is_busy and
             # the status column fall back to the logs
             for id in $(runner_ids_for_target "$t"); do
@@ -1838,6 +2196,9 @@ check_github_health() {
             done
             continue
         fi
+        # Listing works; a scope error stays until the probe or a
+        # registration clears it
+        target_clear_error_except "$t" scope
         polled=1
         online=$(printf '%s\n' "$rows" | awk -F'\t' '$2 == "online" { print $1 }')
 
@@ -1946,8 +2307,8 @@ autoscale_decide() {
 target_queue_depth() {
     local url=$1 cur=$2 busy=$3 q
     if [[ "$(target_type "$url")" == "repo" ]]; then
-        q=$(gh api "repos/${url#https://github.com/}/actions/runs?status=queued&per_page=1" \
-            --jq '.total_count' 2>/dev/null) || return 1
+        q=$(gh_api "repos/${url#https://github.com/}/actions/runs?status=queued&per_page=1" \
+            --jq '.total_count') || { gh_last_load; target_set_error "$url" "$GH_CLASS" "$GH_MSG"; return 1; }
         [[ "$q" =~ ^[0-9]+$ ]] || return 1
         echo "$q"
     elif [[ $cur -gt 0 && $busy -ge $cur ]]; then
@@ -2068,7 +2429,8 @@ setup_runner() {
     fi
 
     [[ -z "$target_url" ]] && { warn "setup_runner: no target given for runner-$id"; return 1; }
-    rm -f "$PID_DIR/runner-$id.target" "$PID_DIR/runner-$id.ephemeral" "$PID_DIR/runner-$id.name"
+    rm -f "$PID_DIR/runner-$id.target" "$PID_DIR/runner-$id.ephemeral" "$PID_DIR/runner-$id.name" \
+          "$PID_DIR/runner-$id.version"
 
     local disk_mb
     disk_mb=$(free_disk_mb)
@@ -2077,8 +2439,15 @@ setup_runner() {
         return 1
     fi
 
-    local pat
-    pat=$(get_pat) || { warn "Failed to get token - run: gh auth login"; return 1; }
+    # A registration token (1 h, single-purpose) rather than the user's own
+    # token on config.sh's command line. Fetched before extracting, so a
+    # permission problem costs no tar run.
+    local tok
+    if ! tok=$(registration_token "$target_url"); then
+        gh_last_load
+        warn "runner-$id: can't get a registration token for $(target_label "$target_url"): $(target_error_note "$target_url")"
+        return 1
+    fi
 
     mkdir -p "$runner_dir" || { warn "Failed to create directory"; return 1; }
 
@@ -2094,7 +2463,7 @@ setup_runner() {
         --unattended
         --name "${RUNNER_NAME_PREFIX}-${id}"
         --url "$target_url"
-        --pat "$pat"
+        --token "$tok"
         --replace
     )
 
@@ -2114,12 +2483,23 @@ setup_runner() {
         # If registration half-succeeded, try to unregister so we don't
         # leave a ghost runner on GitHub; log it for manual cleanup if not.
         if [[ -f "$runner_dir/.runner" ]]; then
-            (cd "$runner_dir" && ./config.sh remove --pat "$pat" >/dev/null 2>&1) \
-                || echo "${RUNNER_NAME_PREFIX}-${id}" >> "$ORPHANS_FILE"
+            local rt
+            if rt=$(remove_token "$target_url") \
+                && (cd "$runner_dir" && ./config.sh remove --token "$rt" >/dev/null 2>&1); then
+                :
+            else
+                echo "${RUNNER_NAME_PREFIX}-${id}" >> "$ORPHANS_FILE"
+            fi
         fi
         rm -rf "$runner_dir"
         return 1
     fi
+
+    # Version it was set up with; the runner may self-update later
+    # (runner_version prefers what is actually on disk)
+    local ver
+    ver=$(tarball_version "$RUNNER_TAR")
+    [[ -n "$ver" ]] && echo "$ver" > "$PID_DIR/runner-$id.version"
 
     # Remember the target (and registration mode) outside .runner, which an
     # ephemeral runner deletes after its job.
@@ -2138,17 +2518,24 @@ reconfigure_runner() {
     local id=$1
     local runner_dir="$RUNNER_BASE_DIR/runner-$id"
     local log_file="$LOG_DIR/runner-$id.log"
-    local target_url pat labels_str config_output
+    local target_url tok labels_str config_output
 
     [[ -f "$runner_dir/.runner" ]] && return 0
     target_url=$(cat "$PID_DIR/runner-$id.target" 2>/dev/null) || target_url=""
     [[ -n "$target_url" ]] || { set_lasterr "$id" "not configured (no saved target)"; return 1; }
     [[ -x "$runner_dir/config.sh" ]] || { set_lasterr "$id" "config.sh not found/executable"; return 1; }
-    pat=$(get_pat) || { set_lasterr "$id" "re-register failed: no gh token"; return 1; }
 
     # Marker line: lets ephemeral_job_finished tell a finished job from a
-    # failed re-registration (so the latter still counts as a crash)
+    # failed re-registration (so the latter still counts as a crash). It
+    # goes before the token fetch so a token failure gets backoff too,
+    # instead of a retry on every tick.
     echo "[runnermaxxer] re-registering ephemeral runner-$id ($(date '+%Y-%m-%d %H:%M:%S'))" >> "$log_file" 2>/dev/null || true
+
+    if ! tok=$(registration_token "$target_url"); then
+        gh_last_load
+        set_lasterr "$id" "re-register failed: $(target_error_note "$target_url")"
+        return 1
+    fi
 
     labels_str="${CACHED_LABELS:-}"
     [[ -z "$labels_str" ]] && labels_str=$(detect_labels)
@@ -2159,7 +2546,7 @@ reconfigure_runner() {
         --unattended
         --name "$name"
         --url "$target_url"
-        --pat "$pat"
+        --token "$tok"
         --replace
         --ephemeral
     )
@@ -2286,11 +2673,17 @@ stop_runner() {
     dlog "runner-$id: stopped"
 }
 
-# True when GitHub answers and does not list runner NAME under TARGET_URL
+# True when GitHub answers and does not list runner NAME under TARGET_URL,
+# or answers 404 for the target itself (deleted repo/org: its runner
+# registrations are gone with it)
 runner_gone_from_github() {
     local url=$1 name=$2 names
     [[ -n "$url" ]] || return 1
-    names=$(gh api --paginate "$(target_api_endpoint "$url")" --jq '.runners[].name' 2>/dev/null) || return 1
+    if ! names=$(gh_api --paginate "$(target_api_endpoint "$url")" --jq '.runners[].name'); then
+        gh_last_load
+        [[ "$GH_CLASS" == "notfound" ]] && return 0
+        return 1
+    fi
     ! grep -qFx -- "$name" <<< "$names"
 }
 
@@ -2302,12 +2695,18 @@ remove_runner() {
 
     if [[ -d "$runner_dir" ]]; then
         if [[ -f "$runner_dir/.runner" ]]; then
-            local pat unregistered=0 reg_name
+            local rt unregistered=0 reg_name reg_url
             reg_name=$(registered_name "$id")
-            if pat=$(get_pat 2>/dev/null); then
-                # --pat (not --token): config.sh exchanges the PAT for a
-                # removal token itself, same as during setup.
-                if (cd "$runner_dir" && ./config.sh remove --pat "$pat" >/dev/null 2>&1); then
+            reg_url=$(runner_registered_url "$id")
+            if rt=$(remove_token "$reg_url"); then
+                if (cd "$runner_dir" && ./config.sh remove --token "$rt" >/dev/null 2>&1); then
+                    unregistered=1
+                fi
+            else
+                gh_last_load
+                if [[ "$GH_CLASS" == "notfound" ]]; then
+                    # The repo/org itself is gone, and its registrations with it
+                    dlog "runner-$id: $(target_label "$reg_url") returns 404 - treating $reg_name as unregistered"
                     unregistered=1
                 fi
             fi
@@ -2617,14 +3016,15 @@ check_github_status() {
         any=1
         echo -e "\n  ${BOLD}$(target_label "$t")${NC}"
         endpoint=$(target_api_endpoint "$t")
-        if out=$(gh api --paginate "$endpoint" --jq '.runners[] | "    \(.name): \(.status)"' 2>/dev/null); then
+        if out=$(gh_api --paginate "$endpoint" --jq '.runners[] | "    \(.name): \(.status)"'); then
             if [[ -n "$out" ]]; then
                 echo "$out"
             else
                 echo -e "    ${DIM}no runners registered${NC}"
             fi
         else
-            echo -e "    ${YELLOW}Could not fetch (may need admin access)${NC}"
+            gh_last_load
+            echo -e "    ${YELLOW}Could not fetch: $(gh_error_note "$GH_CLASS" "$GH_MSG")${NC}"
         fi
     done
     [[ $any -eq 0 ]] && echo -e "  ${YELLOW}No projects configured${NC}"
@@ -3276,7 +3676,7 @@ cli_scale() {
     if [[ $up -eq 1 ]]; then
         RUNNER_TAR=$(detect_runner_tarball)
         [[ -n "$RUNNER_TAR" ]] || die "No runner tarball for ${RUNNER_OS}-${RUNNER_ARCH} - run --download first"
-        gh auth status >/dev/null 2>&1 || die "gh CLI is not authenticated. Run: gh auth login"
+        gh_auth_probe quiet || die "$(gh_error_note "$GH_CLASS" "$GH_MSG")"
     fi
     for ((i = 0; i < ${#SCALE_ARGS[@]}; i += 2)); do
         url=${SCALE_ARGS[i]}; n=${SCALE_ARGS[i+1]}
