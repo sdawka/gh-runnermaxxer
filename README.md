@@ -251,6 +251,14 @@ Usually missing runner dependencies (libicu etc.). Run the runner's bundled inst
 
 If unregistering from GitHub fails (e.g. network down during removal), the runner name is recorded in `runners/.orphaned-registrations`. Delete those runners in GitHub Settings → Actions → Runners, then delete the file.
 
+## Tests
+
+```bash
+./tests/run.sh
+```
+
+A tiny plain-bash test harness (no dependencies, bats not required) that sources `runnermaxxer.sh` as a library against a temporary runner directory and exercises its pure/near-pure functions (URL/target parsing, the project menu, log-status parsing, key decoding, etc.) without ever touching real runners or calling `gh`.
+
 ## License
 
 MIT

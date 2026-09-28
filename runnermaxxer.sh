@@ -2008,6 +2008,13 @@ dashboard_discard() {
 # Main
 # ============================================================================
 
+# Allow the script to be sourced as a library (e.g. by tests) without running
+# the supervisor / argument parsing below. Functions, variables, colours and
+# the `trap cleanup EXIT` above are all safe to define under this guard.
+if [[ "${RUNNERMAXXER_LIB:-0}" == "1" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 detect_platform
 
 # Handle command-line flags
