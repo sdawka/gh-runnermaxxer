@@ -596,13 +596,20 @@ runner_ids_for_target() {
     return 0
 }
 
+# Draining runners are still listed under their target (runner_ids_for_target)
+# but don't count toward its size: they are already on their way out.
 count_runners_for_target() {
-    runner_ids_for_target "$1" | grep -c . || true
+    local n=0 id
+    for id in $(runner_ids_for_target "$1"); do
+        is_draining "$id" || n=$((n + 1))
+    done
+    echo $n
 }
 
 count_running_for_target() {
     local n=0 id
     for id in $(runner_ids_for_target "$1"); do
+        is_draining "$id" && continue
         is_running "$id" && n=$((n + 1))
     done
     echo $n
@@ -636,10 +643,12 @@ known_targets() {
 }
 
 # Idle/stopped runners of a target first, then busy ones; highest ID first
-# within each class. Prints up to N runner IDs.
+# within each class. Already-draining runners are skipped (they are going
+# away anyway). Prints up to N runner IDs.
 pick_victims() {
     local url=$1 n=$2 idle="" busy="" id
     for id in $(runner_ids_for_target "$url" | sort -rn); do
+        is_draining "$id" && continue
         if is_busy "$id"; then
             busy="$busy $id"
         else
@@ -650,12 +659,24 @@ pick_victims() {
     return 0
 }
 
-# Bring one target to exactly N runners. Prints progress; returns 1 if a
+# Bring one target to exactly N runners (draining runners excluded). Busy
+# runners are drained rather than killed. Prints progress; returns 1 if a
 # runner failed to set up or start.
 scale_target() {
     local url=$1 want=$2 cur failed=0 id next_id label k
     label=$(target_label "$url")
     cur=$(count_runners_for_target "$url")
+
+    # Cheapest way back up: cancel pending drains on this target first
+    if [[ $want -gt $cur ]]; then
+        for id in $(runner_ids_for_target "$url"); do
+            [[ $cur -lt $want ]] || break
+            is_draining "$id" || continue
+            unmark_draining "$id"
+            cur=$((cur + 1))
+            echo -e "  ${GREEN}✓${NC} runner-$id: drain cancelled, keeping it"
+        done
+    fi
 
     if [[ $want -gt $cur ]]; then
         if ! target_accessible "$url"; then
@@ -678,7 +699,9 @@ scale_target() {
         echo -e "  ${BLUE}$label: removing $((cur - want)) runner(s)...${NC}"
         for id in $(pick_victims "$url" $((cur - want))); do
             if is_busy "$id"; then
-                echo -e "    ${YELLOW}⚠ runner-$id is mid-job - its job will be aborted${NC}"
+                mark_draining "$id"
+                echo -e "    ${YELLOW}runner-$id is mid-job - draining, it will be removed when the job finishes${NC}"
+                continue
             fi
             echo -e "    Removing runner-$id..."
             remove_runner "$id"
@@ -826,7 +849,7 @@ apply_target_counts() {
         return 1
     fi
 
-    # Warn before killing runners mid-job
+    # Busy runners are drained (removed once their job finishes), not killed
     for ((i = 0; i < ${#M_URLS[@]}; i++)); do
         [[ ${M_WANT[i]} -lt ${M_CUR[i]} ]] || continue
         for id in $(pick_victims "${M_URLS[i]}" $((M_CUR[i] - M_WANT[i]))); do
@@ -837,14 +860,7 @@ apply_target_counts() {
     tput cnorm 2>/dev/null || true
     echo ""
     if [[ -n "$busy" ]]; then
-        printf '  %b' "${YELLOW}Jobs in progress on:$busy - they will be aborted. Continue? [y/N]: ${NC}"
-        local sure=""
-        read -r sure || true
-        if [[ ! "$sure" =~ ^[Yy] ]]; then
-            tput civis 2>/dev/null || true
-            M_MSG="${DIM}Cancelled - nothing changed${NC}"
-            return 1
-        fi
+        echo -e "  ${YELLOW}Jobs in progress on:$busy - draining, removed when their jobs finish${NC}"
     fi
 
     for ((i = 0; i < ${#M_URLS[@]}; i++)); do
@@ -1243,6 +1259,19 @@ is_marked_stopped() {
     [[ -f "$PID_DIR/runner-$1.stopped" ]]
 }
 
+# Draining: remove the runner as soon as its current job finishes
+mark_draining() {
+    touch "$PID_DIR/runner-$1.draining"
+}
+
+unmark_draining() {
+    rm -f "$PID_DIR/runner-$1.draining"
+}
+
+is_draining() {
+    [[ -f "$PID_DIR/runner-$1.draining" ]]
+}
+
 is_quarantined() {
     [[ -f "$PID_DIR/runner-$1.quarantined" ]]
 }
@@ -1279,6 +1308,7 @@ clear_runner_state() {
     clear_failure_state "$1"
     rm -f "$PID_DIR/runner-$1.pid" \
           "$PID_DIR/runner-$1.stopped" \
+          "$PID_DIR/runner-$1.draining" \
           "$PID_DIR/runner-$1.laststart"
 }
 
@@ -1423,6 +1453,14 @@ supervise_runners() {
 
     for id in $(get_runner_ids); do
         rotate_log "$id"
+        # Draining: remove once idle or exited; never restart it
+        if is_draining "$id"; then
+            if ! is_busy "$id"; then
+                remove_runner "$id" >/dev/null 2>&1 || true
+                unmark_draining "$id"
+            fi
+            continue
+        fi
         is_marked_stopped "$id" && continue
 
         if is_running "$id"; then
@@ -1745,6 +1783,10 @@ render_runner_line() {
         [[ "$status" == "idle"* ]] && status_color="${DIM}"
         [[ "$status" == *"error"* ]] && status_color="${RED}"
 
+        if is_draining "$id"; then
+            echo -e "    ${YELLOW}●${NC} runner-$id ${DIM}PID $pid${NC} ${YELLOW}[draining: ${status#running: }]${NC}"
+            return 0
+        fi
         echo -e "    ${GREEN}●${NC} runner-$id ${DIM}PID $pid${NC} ${status_color}[$status]${NC}"
     elif is_marked_stopped "$id"; then
         echo -e "    ${RED}○${NC} runner-$id ${DIM}stopped${NC}"
@@ -1901,11 +1943,35 @@ remove_runner_prompt() {
     local id="${PICK_IDS[$PICK_INDEX]}"
     [[ -d "$RUNNER_BASE_DIR/runner-$id" ]] || { echo -e "  ${YELLOW}Not found${NC}"; sleep 1; return 0; }
 
+    local drain=0 url i
     if is_busy "$id"; then
-        printf '  %b' "${YELLOW}runner-$id is running a job - remove anyway? [y/N]: ${NC}"
-        local sure
-        read -r sure
-        [[ "$sure" =~ ^[Yy] ]] || { echo -e "  ${DIM}Cancelled${NC}"; sleep 1; return 0; }
+        printf '  %b' "${YELLOW}runner-$id is running a job - [d]rain (remove after current job) / [k]ill now / [c]ancel [D/k/c]: ${NC}"
+        local choice=""
+        read -r choice || true
+        case "$choice" in
+            [Kk]*) ;;
+            [Cc]*) echo -e "  ${DIM}Cancelled${NC}"; sleep 1; return 0 ;;
+            *)     drain=1 ;;
+        esac
+    fi
+
+    # Drop the target's count along with the runner so the dashboard
+    # doesn't show a pending "N-1 → N" change afterwards (a draining runner
+    # is already excluded from the count)
+    url=$(runner_registered_url "$id")
+    if [[ -n "$url" ]] && ! is_draining "$id"; then
+        for ((i = 0; i < ${#M_URLS[@]}; i++)); do
+            if same_target "${M_URLS[i]}" "$url" && [[ ${M_WANT[i]} -eq ${M_CUR[i]} && ${M_WANT[i]} -gt 0 ]]; then
+                M_WANT[i]=$((M_WANT[i] - 1))
+            fi
+        done
+    fi
+
+    if [[ $drain -eq 1 ]]; then
+        mark_draining "$id"
+        echo -e "  ${YELLOW}runner-$id is draining - it will be removed when the job finishes${NC}"
+        sleep 1
+        return 0
     fi
 
     echo -e "  ${BLUE}Removing runner-$id...${NC}"
