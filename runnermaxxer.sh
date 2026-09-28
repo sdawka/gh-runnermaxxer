@@ -185,6 +185,52 @@ free_disk_mb() {
     echo "$mb"
 }
 
+# Whether `date` understands GNU's `-d`. Probed once and cached so hot
+# paths (status refresh) don't fork an extra process per call.
+DATE_IS_GNU=""
+_detect_date_style() {
+    [[ -n "$DATE_IS_GNU" ]] && return 0
+    if date -d @0 >/dev/null 2>&1; then
+        DATE_IS_GNU=1
+    else
+        DATE_IS_GNU=0
+    fi
+    return 0
+}
+
+# Convert a runner log timestamp ("2026-09-27 14:44:46Z") to epoch
+# seconds. Prints nothing and returns 1 on any failure so callers can
+# silently omit derived output.
+log_ts_to_epoch() {
+    local ts="${1%Z}" epoch
+    _detect_date_style
+    if [[ "$DATE_IS_GNU" == "1" ]]; then
+        epoch=$(date -u -d "$ts" +%s 2>/dev/null) || return 1
+    else
+        epoch=$(date -j -u -f '%Y-%m-%d %H:%M:%S' "$ts" +%s 2>/dev/null) || return 1
+    fi
+    [[ "$epoch" =~ ^[0-9]+$ ]] || return 1
+    echo "$epoch"
+    return 0
+}
+
+# Render a duration in seconds as a compact "1h05m" / "12m" / "45s" string.
+format_duration() {
+    local secs="$1" h m s
+    [[ "$secs" =~ ^[0-9]+$ ]] || return 1
+    h=$(( secs / 3600 ))
+    m=$(( (secs % 3600) / 60 ))
+    s=$(( secs % 60 ))
+    if [[ $h -gt 0 ]]; then
+        printf '%dh%02dm\n' "$h" "$m"
+    elif [[ $m -gt 0 ]]; then
+        printf '%dm\n' "$m"
+    else
+        printf '%ds\n' "$s"
+    fi
+    return 0
+}
+
 # ============================================================================
 # Runner tarball detection / download
 # ============================================================================
@@ -235,6 +281,46 @@ download_runner_tarball() {
     fi
 
     echo -e "${GREEN}✓${NC} Downloaded $asset"
+    return 0
+}
+
+# Best-effort, non-fatal check: warn once at startup if the shipped tarball
+# is older than the latest actions/runner release. Never blocks startup and
+# never errors out (offline, no gh auth, etc. all just skip silently).
+# The latest-tag lookup is cached in $RUNNER_BASE_DIR/.latest-runner-tag
+# (epoch + tag, one per line) and reused for 24h so this doesn't add a
+# network round-trip to every launch.
+check_tarball_freshness() {
+    [[ -n "$RUNNER_TAR" ]] || return 0
+    command -v gh >/dev/null 2>&1 || return 0
+
+    local base current_ver cache_file now cached_epoch cached_tag latest_tag latest_ver
+    base=$(basename "$RUNNER_TAR")
+    current_ver=$(echo "$base" | sed -n "s/^actions-runner-${RUNNER_OS}-${RUNNER_ARCH}-\(.*\)\.tar\.gz\$/\1/p")
+    [[ -n "$current_ver" ]] || return 0
+
+    cache_file="$RUNNER_BASE_DIR/.latest-runner-tag"
+    now=$(date -u +%s 2>/dev/null) || return 0
+    latest_tag=""
+
+    if [[ -f "$cache_file" ]]; then
+        cached_epoch=$(sed -n '1p' "$cache_file" 2>/dev/null)
+        cached_tag=$(sed -n '2p' "$cache_file" 2>/dev/null)
+        if [[ "$cached_epoch" =~ ^[0-9]+$ && -n "$cached_tag" && $(( now - cached_epoch )) -lt 86400 ]]; then
+            latest_tag="$cached_tag"
+        fi
+    fi
+
+    if [[ -z "$latest_tag" ]]; then
+        latest_tag=$(gh api repos/actions/runner/releases/latest --jq .tag_name 2>/dev/null) || return 0
+        [[ -n "$latest_tag" ]] || return 0
+        { echo "$now"; echo "$latest_tag"; } > "$cache_file" 2>/dev/null || true
+    fi
+
+    latest_ver="${latest_tag#v}"
+    if [[ -n "$latest_ver" && "$latest_ver" != "$current_ver" ]]; then
+        echo -e "${YELLOW}Runner tarball is $current_ver, latest is $latest_ver - run ./runnermaxxer.sh --download to update (new runners only)${NC}"
+    fi
     return 0
 }
 
@@ -1327,9 +1413,21 @@ get_runner_status() {
 
     case "$last" in
         *"Running job:"*)
-            local job_name
+            local job_name ts start_epoch now_epoch elapsed dur suffix
             job_name=$(echo "$last" | sed 's/.*Running job: //' | cut -c1-25)
-            echo "running: $job_name"
+            suffix=""
+            ts=$(echo "$last" | sed -n 's/^\([0-9][0-9-]* [0-9:]*Z\):.*/\1/p')
+            if [[ -n "$ts" ]] && start_epoch=$(log_ts_to_epoch "$ts" 2>/dev/null); then
+                now_epoch=$(date -u +%s 2>/dev/null || echo "")
+                if [[ "$now_epoch" =~ ^[0-9]+$ ]]; then
+                    elapsed=$(( now_epoch - start_epoch ))
+                    [[ $elapsed -ge 0 ]] || elapsed=0
+                    if dur=$(format_duration "$elapsed" 2>/dev/null) && [[ -n "$dur" ]]; then
+                        suffix=" ($dur)"
+                    fi
+                fi
+            fi
+            echo "running: $job_name$suffix"
             ;;
         *"Listening for Jobs"*)          echo "idle" ;;
         *"completed with result: "*)     echo "idle (last: ${last##*completed with result: })" ;;
@@ -2108,6 +2206,7 @@ load_targets verbose >/dev/null
 
 echo -e "${DIM}Running preflight checks...${NC}"
 preflight_checks
+check_tarball_freshness || true
 
 # Adopt/clean up state left behind by a previous manager instance
 reconcile_state
