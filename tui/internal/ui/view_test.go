@@ -176,3 +176,12 @@ func TestDashboardCompactHeaderBelow30Rows(t *testing.T) {
 		t.Errorf("expected the compact header to drop the tarball summary line at height 25:\n%s", got)
 	}
 }
+
+// A full-height frame drawn inline scrolls its top line into scrollback on
+// every redraw (the status bar piles up above the dashboard), so View must
+// ask for the alternate screen.
+func TestViewUsesAltScreen(t *testing.T) {
+	if !dashboardModel(t, 80, 25, loadFullSnapshotForView(t)).View().AltScreen {
+		t.Error("View() is not on the alternate screen")
+	}
+}

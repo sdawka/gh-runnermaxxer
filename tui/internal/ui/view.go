@@ -10,9 +10,13 @@ import (
 // View implements tea.Model: status bar, banners, the grouped runner table,
 // the detail/log area, and a footer that is either the short help line or
 // the latest toast. Below 12 rows (§3.2) the footer help line is dropped to
-// leave room for the table; '?' still opens the full help overlay.
+// leave room for the table; '?' still opens the full help overlay. The
+// frame is drawn on the alternate screen: inline, a frame as tall as the
+// terminal scrolls its top line into scrollback on every redraw.
 func (m Model) View() tea.View {
-	return tea.NewView(m.renderString())
+	v := tea.NewView(m.renderString())
+	v.AltScreen = true
+	return v
 }
 
 // logPaneWidth is how much of the frame's width the side pane takes when
