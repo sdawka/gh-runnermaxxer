@@ -82,5 +82,5 @@ release:
   header: |
     Each archive contains the `runnermaxxer-tui` binary plus `runnermaxxer.sh`
     (the bash engine the TUI drives). Run `./runnermaxxer.sh --daemon` (or
-    `--install-service`), then `runnermaxxer-tui`. The bash dashboard still
-    works as before.
+    `--install-service`), then `runnermaxxer-tui`. From a clone, `./start`
+    does all of this in one step.
