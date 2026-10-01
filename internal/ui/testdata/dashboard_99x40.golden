@@ -1,0 +1,40 @@
+gh-runnermaxxer 3.1.0 · tick 2s ago · gh: sahil ◂ (repo, admin:org) · rate 4812/5000
+tarball 2.334.0 (latest 2.337.0) ⚠ [g]et latest · disk 41% free
+[2m⚠ REFRESH_INTERVAL clamped to 1[m
+  PROJECT / RUNNER         PID     STATE        JOB
+◂ ▾ myorg/myrepo           2/2                  [2mauto 1-5[m  [2mqueued 3[m
+    ● mac-1                4121    idle
+    [1m●[m mac-2                4122    busy         build (12m)
+    [7m✖[m mac-5                -       quarantined
+  ▾ myorg/other            2/2
+    ● mac-3                4123    idle         [2midle (last: Succeeded)[m
+    [1m◌[m mac-4                -       backoff 18s
+  ▾ myorg (org)            [2m0/1[m/0                [7m⚠ scope[m
+  ▾ Unconfigured (incomplete setup - remove with d)
+    [2m○[m mac-9                -       stopped      [2munconfigured[m
+[2m───────────────────────────────────────────────────────────────────────────────────────────────────[m
+[1mmyorg/myrepo[m
+[2murl[m https://github.com/myorg/myrepo
+[2mtype[m repo  [2mlisted[m yes  [2mrunners[m have 2 · want 2 · running 2 · busy 1  [2mscale[m 1-5 · autoscale on
+[2mqueue[m queued 3 · unsatisfiable 0
+[2m── event log ──────────────────────────────────────────────────────────────────────────────────────[m
+2026-09-28T12:00:40 tick: 3 targets, 5 runners, 1 busy
+2026-09-28T12:00:41 myorg/myrepo: queued 3, scaling 2 -> 2 (max 5)
+2026-09-28T12:00:42 mac-4: exited unexpectedly (fails 2), retry in 20s
+2026-09-28T12:00:43 myorg (org): token lacks admin:org
+2026-09-28T12:00:45 tick: 3 targets, 5 runners, 1 busy
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[2m↑↓ move  ←→ count  Enter apply  Esc discard  d drain  x stop  s start  r restart  t projects  ? he…[m

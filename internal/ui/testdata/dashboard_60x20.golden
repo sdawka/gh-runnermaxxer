@@ -1,0 +1,20 @@
+gh-runnermaxxer 3.1.0 · tick 2s ago · gh: sahil ◂ (repo, ad…
+[2m⚠ REFRESH_INTERVAL clamped to 1[m
+  PROJECT / RUNNER         PID     STATE        JOB
+◂ ▾ myorg/myrepo           2/2                  [2mauto 1-5[m  [2mq…[m
+    ● mac-1                4121    idle
+    [1m●[m mac-2                4122    busy         build (12m)
+    [7m✖[m mac-5                -       quarantined
+  ▾ myorg/other            2/2
+    ● mac-3                4123    idle         [2midle (last:…[m
+    [1m◌[m mac-4                -       backoff 18s
+  ▾ myorg (org)            [2m0/1[m/0                [7m⚠ scope[m
+  ▾ Unconfigured (incomplete setup - remove with d)
+    [2m○[m mac-9                -       stopped      [2munconfigured[m
+[2m────────────────────────────────────────────────────────────[m
+[1mmyorg/myrepo[m
+[2murl[m https://github.com/myorg/myrepo
+[2mtype[m repo  [2mlisted[m yes
+[2mrunners[m have 2 · want 2 · running 2 · busy 1
+[2mscale[m 1-5 · autoscale on  [2mqueue[m queued 3 · unsatisfiable 0
+[2m↑↓ move  ←→ count  Enter apply  Esc discard  d drain  x sto…[m

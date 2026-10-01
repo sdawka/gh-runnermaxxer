@@ -1,0 +1,50 @@
+gh-runnermaxxer 4.0.0 · tick 2s ago · gh: sahil ◂ (repo) · rate 4990/5000
+tarball 2.337.0 · disk 63% free
+  PROJECT / RUNNER             PID     STATE        JOB                                                   [2m│[m [1mmac-38 · acme (org)[m
+[2m  ▲ 3 more[m                                                                                                [2m│[m [2mstate    [mbackoff 10s
+    [1m◌[m mac-3                    -       backoff 10s                                                        [2m│[m [2mpid      [m-
+    ● mac-4                    7004    idle                                                               [2m│[m [2mversion  [m2.337.0
+    ● mac-5                    7005    idle         [2mephemeral[m                                             [2m│[m [2mfails    [m2 · retry in 10s
+    ● mac-6                    7006    idle                                                               [2m│[m [2mwork     [m380 MB
+    [1m●[m mac-7                    7007    busy         integration-tests (linux, arm64, full matrix) (7m)    [2m│[m [2mlog      [m/abs/runners/.logs/runner-38.log
+    ● mac-8                    7008    idle                                                               [2m│[m [2mlasterr  [m[7mexited unexpectedly: Runner listener exit[m
+    ● mac-9                    7009    idle                                                               [2m│[m          [7mwith retryable error, re-launch runner in 5[m
+    [1m◌[m mac-10                   -       backoff 10s                                                        [2m│[m          [7mseconds[m
+    ● mac-11                   7011    idle                                                               [2m│[m [2m── log: mac-38 ─────────────────────────────────────[m
+    ● mac-12                   7012    idle         [2mephemeral[m                                             [2m│[m √ Connected to GitHub
+  ▾ acme/web-frontend-monorepo 12/12                                                                      [2m│[m Current runner version: '2.337.0'
+    ● mac-13                   7013    idle                                                               [2m│[m 2026-09-28 12:00:01Z: Listening for Jobs
+    [1m●[m mac-14                   7014    busy         integration-tests (linux, arm64, full matrix) (7m)    [2m│[m 2026-09-28 12:04:12Z: Running job: build
+    ● mac-15                   7015    idle                                                               [2m│[m
+    ● mac-16                   7016    idle                                                               [2m│[m
+    [1m◌[m mac-17                   -       backoff 10s                                                        [2m│[m
+    ● mac-18                   7018    idle                                                               [2m│[m
+    ● mac-19                   7019    idle         [2mephemeral[m                                             [2m│[m
+    ● mac-20                   7020    idle                                                               [2m│[m
+    [1m●[m mac-21                   7021    busy         integration-tests (linux, arm64, full matrix) (7m)    [2m│[m
+    ● mac-22                   7022    idle                                                               [2m│[m
+    ● mac-23                   7023    idle                                                               [2m│[m
+    [1m◌[m mac-24                   -       backoff 10s                                                        [2m│[m
+  ▾ acme/infra                 12/12                                                                      [2m│[m
+    ● mac-25                   7025    idle                                                               [2m│[m
+    ● mac-26                   7026    idle         [2mephemeral[m                                             [2m│[m
+    ● mac-27                   7027    idle                                                               [2m│[m
+    [1m●[m mac-28                   7028    busy         integration-tests (linux, arm64, full matrix) (7m)    [2m│[m
+    ● mac-29                   7029    idle                                                               [2m│[m
+    ● mac-30                   7030    idle                                                               [2m│[m
+    [1m◌[m mac-31                   -       backoff 10s                                                        [2m│[m
+    ● mac-32                   7032    idle                                                               [2m│[m
+    ● mac-33                   7033    idle         [2mephemeral[m                                             [2m│[m
+    ● mac-34                   7034    idle                                                               [2m│[m
+    [1m●[m mac-35                   7035    busy         integration-tests (linux, arm64, full matrix) (7m)    [2m│[m
+    ● mac-36                   7036    idle                                                               [2m│[m
+  ▾ acme (org)                 12/12                [7m⚠ scope[m                                               [2m│[m
+    ● mac-37                   7037    idle                                                               [2m│[m
+◂   [1m◌[m mac-38                   -       backoff 10s                                                        [2m│[m
+    ● mac-39                   7039    idle                                                               [2m│[m
+    ● mac-40                   7040    idle         [2mephemeral[m                                             [2m│[m
+    ● mac-41                   7041    idle                                                               [2m│[m
+    [1m●[m mac-42                   7042    busy         integration-tests (linux, arm64, full matrix) (7m)    [2m│[m
+    ● mac-43                   7043    idle                                                               [2m│[m
+[2m  ▼ 5 more[m                                                                                                [2m│[m
+[2m↑↓ move  ←→ count  Enter apply  Esc discard  d drain  x stop  s start  r restart  t projects  ? help[m

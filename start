@@ -1,65 +1,19 @@
 #!/usr/bin/env bash
-# One command to bring up gh-runnermaxxer with the Go TUI:
-#   1. builds tui/bin/runnermaxxer-tui if it is missing or older than its sources
-#   2. runs the setup wizard if there is no .runnermaxxer.conf yet
-#   3. downloads the GitHub Actions runner tarball if none is present
-#   4. starts the headless supervisor (--daemon) in the background if none is running
-#   5. opens the TUI (quitting it leaves the daemon and runners running)
+# One command to run gh-runnermaxxer: builds bin/runnermaxxer if it is missing
+# or older than its sources, then runs it on this directory. The program does
+# the rest (first-run setup, the runner download, supervising the runners
+# while it is open).
 #
-# Extra arguments are passed to the TUI, e.g. ./start --no-unicode
-# Stop the supervisor with: ./runnermaxxer.sh --stop-daemon
+# Extra arguments are passed through, e.g. ./start --no-unicode
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT="$ROOT/runnermaxxer.sh"
-TUI="$ROOT/tui/bin/runnermaxxer-tui"
-RUNNER_BASE_DIR="${RUNNER_BASE_DIR:-$ROOT/runners}"
-PID_FILE="$RUNNER_BASE_DIR/.daemon.pid"
-LOG_DIR="$RUNNER_BASE_DIR/.logs"
+BIN="$ROOT/bin/runnermaxxer"
 
-die() { echo "start: $*" >&2; exit 1; }
-
-# Same liveness test as runnermaxxer.sh's daemon_pid()
-daemon_pid() {
-    local pid
-    pid=$(cat "$PID_FILE" 2>/dev/null) || return 1
-    [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null || return 1
-    ps -p "$pid" -o command= 2>/dev/null | grep -q -- '--daemon' || return 1
-    echo "$pid"
-}
-
-# 1. Build the TUI when needed
-if [[ ! -x "$TUI" ]] || [[ -n "$(find "$ROOT/tui" \( -name '*.go' -o -name go.mod -o -name go.sum \) -newer "$TUI" -print -quit)" ]]; then
-    command -v go >/dev/null || die "Go is needed to build the TUI - install it from https://go.dev/dl/"
-    echo "Building runnermaxxer-tui..."
-    make -s -C "$ROOT/tui" build
+if [[ ! -x "$BIN" ]] || [[ -n "$(find "$ROOT/cmd" "$ROOT/internal" "$ROOT/go.mod" "$ROOT/go.sum" \( -name '*.go' -o -name go.mod -o -name go.sum \) -newer "$BIN" -print -quit)" ]]; then
+    command -v go >/dev/null || { echo "start: Go is needed to build runnermaxxer - install it from https://go.dev/dl/" >&2; exit 1; }
+    echo "Building runnermaxxer..."
+    make -s -C "$ROOT" build
 fi
 
-# 2. First run: interactive setup
-if [[ ! -f "$ROOT/.runnermaxxer.conf" ]]; then
-    "$SCRIPT" --setup
-fi
-
-# 3. Runner tarball (new runners are extracted from it)
-if ! compgen -G "$ROOT/actions-runner-*.tar.gz" >/dev/null; then
-    "$SCRIPT" --download
-fi
-
-# 4. Supervisor
-if pid=$(daemon_pid); then
-    echo "Daemon already running (pid $pid)"
-else
-    echo "Starting daemon..."
-    mkdir -p "$LOG_DIR"
-    nohup "$SCRIPT" --daemon </dev/null >>"$LOG_DIR/daemon.out" 2>&1 &
-    for _ in $(seq 1 10); do
-        pid=$(daemon_pid) && break
-        kill -0 $! 2>/dev/null || die "daemon exited during startup - see $LOG_DIR/daemon.out"
-        sleep 1
-    done
-    [[ -n "${pid:-}" ]] && echo "Daemon started (pid $pid)" \
-        || echo "Daemon still starting - the TUI will pick it up (log: $LOG_DIR/daemon.out)"
-fi
-
-# 5. TUI
-exec "$TUI" --script "$SCRIPT" --runner-dir "$RUNNER_BASE_DIR" "$@"
+exec "$BIN" --dir "$ROOT" "$@"

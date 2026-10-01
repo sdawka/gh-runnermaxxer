@@ -18,13 +18,13 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-go@v5
         with:
-          go-version-file: tui/go.mod
-      - name: VERSION matches tag
+          go-version-file: go.mod
+      - name: Version matches tag
         run: |
           tag="${GITHUB_REF#refs/tags/v}"
-          script_version="$(grep -m1 '^VERSION=' runnermaxxer.sh | cut -d'"' -f2)"
-          if [[ "$tag" != "$script_version" ]]; then
-            echo "::error::tag v$tag does not match runnermaxxer.sh VERSION=$script_version" >&2
+          version="$(grep -h -m1 '^const Version = ' internal/engine/*.go | cut -d'"' -f2)"
+          if [[ "$tag" != "$version" ]]; then
+            echo "::error::tag v$tag does not match engine.Version=$version" >&2
             exit 1
           fi
       - uses: goreleaser/goreleaser-action@v6
@@ -32,10 +32,5 @@ jobs:
           distribution: goreleaser
           version: latest
           args: release --clean
-          workdir: tui
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # A PAT (not GITHUB_TOKEN) is required to push the generated
-          # formula/cask to the separate sdawka/homebrew-tap repo -
-          # GITHUB_TOKEN is scoped to this repo only.
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

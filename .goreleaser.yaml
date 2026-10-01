@@ -1,0 +1,40 @@
+version: 2
+project_name: runnermaxxer
+
+builds:
+  - id: runnermaxxer
+    main: ./cmd/runnermaxxer
+    binary: runnermaxxer
+    env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+    flags:
+      - -trimpath
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - .runnermaxxer.conf.sample
+      - .runnermaxxer.targets.sample
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+
+release:
+  github:
+    owner: sdawka
+    name: gh-runnermaxxer
+  header: |
+    Each archive contains the self-contained `runnermaxxer` binary. Run it from
+    the directory you want its config and runners in (or pass `--dir DIR`).
+    From a clone, `./start` builds and runs it in one step.

@@ -1,3 +1,7 @@
+# Build output
+/bin/
+/dist/
+
 # Runner tarballs (large binaries)
 actions-runner-*.tar.gz
 
@@ -13,9 +17,6 @@ runners/
 
 # macOS
 .DS_Store
-
-# Old script (if present)
-runners.sh
 
 # Claude Code local state
 .claude/

@@ -3,7 +3,7 @@
 A terminal UI for running many GitHub Actions self-hosted runners on one machine, across any number of repositories and organizations.
 
 ```
-gh-runnermaxxer 3.1.0 · daemon 41213 · tick 2s ago · gh: you (repo, admin:org)
+gh-runnermaxxer 4.0.0 · tick 2s ago · gh: you (repo, admin:org)
   PROJECT / RUNNER         PID     STATE        JOB
 ◂ ▾ myorg/myrepo           2/2                  auto 1-5  queued 3
     ● mac-1                4121    idle
@@ -14,7 +14,7 @@ gh-runnermaxxer 3.1.0 · daemon 41213 · tick 2s ago · gh: you (repo, admin:org
     ◌ mac-4                -       backoff 18s
   ▾ myorg (org)            0/1/0                ⚠ scope
 ────────────────────────────────────────────────────────────────────────────────
-── daemon log ──────────────────────────────────────────────────────────────────
+── event log ───────────────────────────────────────────────────────────────────
 2026-09-28T12:00:41 myorg/myrepo: queued 3, scaling 2 -> 2 (max 5)
 2026-09-28T12:00:42 mac-4: exited unexpectedly (fails 2), retry in 20s
 ↑↓ move  ←→ count  Enter apply  Esc discard  d drain  x stop  s start  r restart
@@ -26,23 +26,23 @@ gh-runnermaxxer 3.1.0 · daemon 41213 · tick 2s ago · gh: you (repo, admin:org
 git clone https://github.com/sdawka/gh-runnermaxxer.git && cd gh-runnermaxxer && ./start
 ```
 
-That's it. `./start` (also available as `make start`):
+That's it. `./start` builds the `runnermaxxer` binary (if it's missing or out of date) and opens it. Everything else happens inside the program:
 
-1. builds the TUI if it's missing or out of date,
-2. runs a short setup wizard on first run (runner name prefix, max runners),
-3. downloads the latest GitHub Actions runner for your OS/arch (checksum-verified) if you don't have one,
-4. starts the background supervisor if it isn't already running,
-5. opens the TUI.
+1. On first run, a short setup screen asks for a runner name prefix and the maximum number of runners.
+2. Press `a` to add a repository or organization, `←`/`→` to choose how many runners it gets, and `Enter` to apply. The GitHub Actions runner for your OS/arch is downloaded (checksum-verified) the first time it's needed.
+3. While the program is open, it supervises your runners: restarting crashed ones, recycling ones GitHub reports offline, and autoscaling if you've enabled it.
 
-In the TUI, press `a` to add a repository or organization, `←`/`→` to choose how many runners it gets, and `Enter` to apply. Run `./start` again any time to reopen it.
+**One program, one process.** Runners run only while `runnermaxxer` is open. Quitting (`q`) stops them:
 
-Quitting the TUI (`q`) never stops anything: the supervisor and runners keep running in the background. To stop the supervisor: `./runnermaxxer.sh --stop-daemon` (runners keep running; the next `./start` re-adopts them).
+- If no runner is busy, they're stopped right away.
+- If jobs are running, you choose: **Stop now** (cancels those jobs), **Wait for jobs, then quit** (runners finish their current job first), or **Cancel**.
+
+Runners stay registered with GitHub, so the next `./start` brings them all back. If the program is killed outright, the next launch adopts any runners that were left running.
 
 ## Requirements
 
-- [Go](https://go.dev/dl/) 1.26+ (to build the TUI)
+- [Go](https://go.dev/dl/) 1.26+ (to build it)
 - [GitHub CLI](https://cli.github.com/) (`gh`), authenticated with `gh auth login`
-- bash >= 3.2 (stock macOS bash works)
 - macOS (Intel or Apple Silicon) or glibc-based Linux (Debian, Ubuntu, Fedora, Arch, ..., including WSL2)
 
 Not supported: Windows, Alpine/musl (the runner requires glibc), WSL1. These are detected and fail fast with a clear message. On Linux, if `libicu` is missing you're pointed at the runner's bundled `installdependencies.sh`.
@@ -55,8 +55,7 @@ Not supported: Windows, Alpine/musl (the runner requires glibc), WSL1. These are
 - **Drain, don't kill** - scaling down never aborts a job: a busy runner is marked *draining* and removed as soon as its current job finishes
 - **Autoscaling within bounds** (opt-in) - give a project `min`/`max` bounds and it grows when GitHub has queued runs and shrinks after runners sit idle
 - **Auto-detected labels** - OS, arch, memory, GPU, Docker, etc. (see [Labels](#auto-detected-labels))
-- **Survives restarts** - runners are detached processes; a restarted supervisor re-adopts them instead of starting duplicates
-- **Runs at login** - install the supervisor as a launchd (macOS) or systemd user (Linux) service with one key
+- **Crash-safe** - if the program is killed, the next launch re-adopts still-running runners instead of starting duplicates
 - **Housekeeping** - auto-downloaded, checksum-verified runner tarball with stale-version warnings; log rotation; config validation
 - **Uses `gh` for auth** - no personal access tokens to manage
 
@@ -75,21 +74,20 @@ Arrows and vi-style `hjkl` both work. Shifted letters act on every runner instea
 | `D` | Remove the runner under the cursor now (no drain); always confirms |
 | `x`/`X` | Stop the runner under the cursor / stop all |
 | `s` | Start the runner under the cursor (clears quarantine) |
-| `S` | Start all runners - or, if the supervisor isn't running, start it |
+| `S` | Start all runners |
 | `r`/`R` | Restart the runner under the cursor / restart all |
 | `l` | Runner logs |
-| `L` | Supervisor event log |
+| `L` | Event log |
 | `c` | Check runner status on GitHub |
 | `e` | Edit configuration |
 | `g` | Download the latest runner tarball (when the stale-tarball banner shows) |
-| `I` | Install the supervisor as a login service |
 | `/` | Filter rows |
 | `?` | Help |
-| `q`, `ctrl+c` | Quit (never touches runners; confirms only if you have unapplied changes) |
+| `q`, `ctrl+c` | Quit and stop all runners (asks first if jobs are running or you have unapplied changes) |
 
 **Projects screen (`t`)**: same keys, plus `x` removes the project from the list (only when it has no runners), `b` sets autoscale bounds, and `Enter`/`s` applies and returns to the dashboard. `q`/`Esc` discards pending changes and goes back.
 
-TUI flags (pass them to `./start`, e.g. `./start --no-unicode`): `--no-unicode` (ASCII glyphs), `--runner-dir DIR` (where runners live; default `./runners`), `--debug FILE` (debug log), `--version`.
+TUI flags (pass them to `./start`, e.g. `./start --no-unicode`): `--no-unicode` (ASCII glyphs), `--dir DIR` (where config, projects and runners live; `./start` uses the repo directory), `--debug FILE` (debug log), `--version`.
 
 ## Auto-Detected Labels
 
@@ -112,13 +110,9 @@ jobs:
     runs-on: [self-hosted, macos, arm64, docker]
 ```
 
-## How It Works
+## Self-Healing
 
-The TUI is a client. The work is done by `runnermaxxer.sh`, a bash engine that runs as a background supervisor (`--daemon`). The supervisor writes a live snapshot to `runners/.pids/state.json`, which the TUI watches. Every action you take in the TUI is carried out by calling the engine's CLI. You never need to run the engine yourself, but it's there for scripting (see [Scripting](#scripting)).
-
-### Self-healing
-
-Each supervisor tick:
+While the program is open, every tick (`REFRESH_INTERVAL` seconds):
 
 - A runner that dies unexpectedly is restarted with exponential backoff (5s, 10s, 20s, 40s, ...).
 - After `MAX_RESTART_ATTEMPTS` consecutive rapid crashes, the runner is **quarantined** (`✖`, with the failure reason). Press `s` to clear the quarantine and retry.
@@ -127,17 +121,6 @@ Each supervisor tick:
 - The same poll records GitHub's authoritative `busy` flag, which decides whether a runner is busy when scaling down, stopping, or restarting.
 - Runner logs are truncated past `MAX_LOG_SIZE_MB` (a `.log.1` copy is kept).
 - Stale PID files (e.g. after a reboot) are detected via process-identity checks, so a recycled PID is never mistaken for a live runner.
-
-### Running at login
-
-Press `I` in the TUI (or run `./runnermaxxer.sh --install-service`) to have the supervisor start at login and restart if it dies:
-
-- **macOS**: a launchd agent at `~/Library/LaunchAgents/com.gh-runnermaxxer.plist`.
-  Status: `launchctl print gui/$(id -u)/com.gh-runnermaxxer`
-- **Linux**: a systemd user service at `~/.config/systemd/user/gh-runnermaxxer.service`. User services stop when you log out unless lingering is enabled: `loginctl enable-linger $USER`.
-  Status: `systemctl --user status gh-runnermaxxer`
-
-Remove it with `./runnermaxxer.sh --uninstall-service` (runners keep running, unsupervised). `gh` must be authenticated for the user the service runs as.
 
 ## Configuration
 
@@ -192,47 +175,20 @@ By default (`SHARED_TOOL_CACHE=1`) every runner points `RUNNER_TOOL_CACHE` and `
 
 With `EPHEMERAL_RUNNERS=1`, new runners register with `--ephemeral`: each registration takes exactly one job, then the supervisor re-registers and relaunches it (not counted as a crash). Ephemeral runners briefly show `restarting...` after each job. The mode is fixed when a runner is set up; to switch an existing runner, scale its project down and back up.
 
-## Scripting
-
-The engine has a non-interactive CLI for scripts and automation. It exits `0` on success, `1` on failure, `2` on bad usage:
-
-```bash
-./runnermaxxer.sh --status                 # human-readable
-./runnermaxxer.sh --status --json | jq .   # machine-readable
-./runnermaxxer.sh --scale myorg/myrepo=3 --scale myorg=1
-./runnermaxxer.sh --drain 4                # remove runner-4 after its current job
-./runnermaxxer.sh --stop 2 && ./runnermaxxer.sh --start 2
-./runnermaxxer.sh --remove runner-5        # "runner-" prefix is optional
-./runnermaxxer.sh --download               # fetch the latest runner tarball
-./runnermaxxer.sh --stop-daemon            # stop the supervisor (runners keep running)
-```
-
-`--status --json` prints one object:
-
-```json
-{"version":"3.0.0","daemon_pid":4242,"max_runners":20,"github_polled_at":1727430000,
- "projects":[{"url":"https://github.com/myorg/myrepo","label":"myorg/myrepo","listed":true,
-              "configured":2,"running":2,"busy":1,"draining":0}],
- "runners":[{"id":1,"project":"https://github.com/myorg/myrepo","state":"busy","pid":12345,
-             "status":"running: build (3m)","ephemeral":false,"last_error":null}]}
-```
-
-`state` is one of `running`, `idle`, `busy`, `draining`, `stopped`, `quarantined`, `restarting`. While the supervisor runs, the same data is kept fresh in `runners/.pids/state.json`, so `jq . < runners/.pids/state.json` works without calling the CLI at all.
-
 ## Directory Structure
 
 ```
 gh-runnermaxxer/
 ├── start                        # The one way to run it
-├── tui/                         # The Go TUI (built to tui/bin/runnermaxxer-tui)
-├── runnermaxxer.sh              # Engine / supervisor the TUI drives
+├── cmd/runnermaxxer/            # Program entry point (built to bin/runnermaxxer)
+├── internal/                    # engine (supervisor), ui (TUI), state, logtail
 ├── actions-runner-*.tar.gz      # Runner tarball (downloaded automatically)
 ├── .runnermaxxer.conf           # Your configuration (created by setup)
 ├── .runnermaxxer.targets        # Your projects
 └── runners/                     # Runner instances (auto-created)
     ├── runner-1/ ...
-    ├── .pids/                   # PID files, state.json
-    ├── .logs/                   # runner-N.log, runnermaxxer.log (events), daemon.out
+    ├── .pids/                   # PID files (used to re-adopt runners after a crash)
+    ├── .logs/                   # runner-N.log, runnermaxxer.log (event log)
     └── .toolcache/              # Shared tool cache
 ```
 
@@ -242,7 +198,7 @@ gh-runnermaxxer/
 
 **"Token may not have access" / `⚠ scope`** - your `gh` auth needs the `repo` scope for repository runners or `admin:org` for organization runners: `gh auth refresh -s admin:org`.
 
-**Supervisor didn't start** - check `runners/.logs/daemon.out`.
+**"another runnermaxxer is already managing ..."** - only one copy can run per directory. Switch to the window that's already running it, or quit it first.
 
 **Runner shows "offline" on GitHub** - the supervisor normally recycles it within a couple of minutes. If it persists, check logs with `l` and restart with `r`.
 
@@ -255,14 +211,14 @@ gh-runnermaxxer/
 ## Development
 
 ```bash
-make test                          # engine tests + TUI tests
-make build                         # build tui/bin/runnermaxxer-tui
-cd tui && go test -tags integration ./...   # TUI against the real engine, gh stubbed out
+make build                 # build bin/runnermaxxer
+make test                  # unit + golden tests
+make test-integration      # also starts real (fake) runner processes, gh stubbed out
 ```
 
 ## Legacy bash UI
 
-Earlier versions shipped an interactive dashboard written in bash. It has been retired in favour of the Go TUI and is archived on the [`bash-ui`](https://github.com/sdawka/gh-runnermaxxer/tree/bash-ui) branch.
+Earlier versions shipped an interactive dashboard written in bash. It has been retired in favour of this self-contained Go program and is archived on the [`bash-ui`](https://github.com/sdawka/gh-runnermaxxer/tree/bash-ui) branch.
 
 ## License
 

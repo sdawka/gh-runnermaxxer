@@ -1,0 +1,40 @@
+gh-runnermaxxer 3.1.0 · tick 2s ago · gh: sahil ◂ (repo, admin:org) · rate 4812/5000
+tarball 2.334.0 (latest 2.337.0) ⚠ [g]et latest · disk 41% free
+[2m⚠ REFRESH_INTERVAL clamped to 1[m
+  PROJECT / RUNNER         PID     STATE        JOB                            [2m│[m [1mmyorg/myrepo[m
+◂ ▾ myorg/myrepo           2/2                  [2mauto 1-5[m  [2mqueued 3[m             [2m│[m [2murl      [mhttps://github.com/myorg/
+    ● mac-1                4121    idle                                        [2m│[m          myrepo
+    [1m●[m mac-2                4122    busy         build (12m)                    [2m│[m [2mtype     [mrepo
+    [7m✖[m mac-5                -       quarantined                                 [2m│[m [2mlisted   [myes
+  ▾ myorg/other            2/2                                                 [2m│[m [2mrunners  [mhave 2 · want 2 · running 2 ·
+    ● mac-3                4123    idle         [2midle (last: Succeeded)[m         [2m│[m          busy 1
+    [1m◌[m mac-4                -       backoff 18s                                 [2m│[m [2mscale    [m1-5 · autoscale on
+  ▾ myorg (org)            [2m0/1[m/0                [7m⚠ scope[m                        [2m│[m [2mqueue    [mqueued 3 · unsatisfiable 0
+  ▾ Unconfigured (incomplete setup - remove with d)                            [2m│[m [2m── event log ──────────────────────────[m
+    [2m○[m mac-9                -       stopped      [2munconfigured[m                   [2m│[m 2026-09-28T12:00:40 tick: 3 targets, 5…
+                                                                               [2m│[m 2026-09-28T12:00:41 myorg/myrepo: queu…
+                                                                               [2m│[m 2026-09-28T12:00:42 mac-4: exited unex…
+                                                                               [2m│[m 2026-09-28T12:00:43 myorg (org): token…
+                                                                               [2m│[m 2026-09-28T12:00:45 tick: 3 targets, 5…
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+                                                                               [2m│[m
+[2m↑↓ move  ←→ count  Enter apply  Esc discard  d drain  x stop  s start  r restart  t projects  ? help[m
