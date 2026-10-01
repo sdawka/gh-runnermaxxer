@@ -1,4 +1,7 @@
-.PHONY: test build
+.PHONY: start test build
+
+start:
+	./start
 
 test:
 	./tests/run.sh

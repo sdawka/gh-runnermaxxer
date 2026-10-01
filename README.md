@@ -111,9 +111,19 @@ This is the classic bash UI, built into `runnermaxxer.sh` itself and always avai
 
 `runnermaxxer-tui` is an optional Go + Bubble Tea client for `runnermaxxer.sh`. It never manages runner state itself: it only reads the daemon's `state.json` snapshot (or falls back to `runnermaxxer.sh --status --json`, polled every 5s, when no daemon is running) and drives every mutation through the same scripting CLI verbs documented in [Scripting / CLI](#scripting--cli) below. **It never stops runners on its own - close it freely, the same as the bash TUI.**
 
+From a clone, one command does everything:
+
 ```bash
-cd tui && go build -o bin/runnermaxxer-tui ./cmd/runnermaxxer-tui   # or: make -C tui build
-./tui/bin/runnermaxxer-tui --script ../runnermaxxer.sh
+./start          # or: make start
+```
+
+It builds `tui/bin/runnermaxxer-tui` if it is missing or older than its sources, runs the setup wizard if there is no `.runnermaxxer.conf` yet, starts the supervisor (`--daemon`, logging to `runners/.logs/daemon.out`) in the background if none is running, and opens the TUI. Extra arguments go to the TUI (`./start --no-unicode`). Quitting the TUI leaves the daemon and runners running; stop the daemon with `./runnermaxxer.sh --stop-daemon`.
+
+To build and run it by hand instead:
+
+```bash
+make -C tui build
+./tui/bin/runnermaxxer-tui --script ./runnermaxxer.sh
 ```
 
 It finds `runnermaxxer.sh` via, in order: `--script PATH`, the `RUNNERMAXXER_SCRIPT` env var, a sibling of the `runnermaxxer-tui` binary, or `PATH`. Other flags: `--runner-dir DIR` (equivalent to exporting `RUNNER_BASE_DIR`), `--no-unicode` (ASCII glyphs for terminals without box-drawing/Unicode support), `--debug FILE` (Bubble Tea debug log), `--version`.
