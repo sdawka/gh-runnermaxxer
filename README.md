@@ -3,7 +3,7 @@
 A terminal UI for running many GitHub Actions self-hosted runners on one machine, across any number of repositories and organizations.
 
 ```
-gh-runnermaxxer 4.0.0 · tick 2s ago · gh: you (repo, admin:org)
+gh-runnermaxxer 5.0.0 · tick 2s ago · gh: you (repo, admin:org)
   PROJECT / RUNNER         PID     STATE        JOB
 ◂ ▾ myorg/myrepo           2/2                  auto 1-5  queued 3
     ● mac-1                4121    idle
